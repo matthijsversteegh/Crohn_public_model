@@ -1,0 +1,2827 @@
+---
+title: "Microsimulation model Crohn's disease"
+authors: "Dr Matthijs Versteegh & Dr Simone Huygens"
+date: "January 7th 2025"
+output: word_document
+model type: Microsimulations (expanded from DARTH modeling framework to incorporate survival)
+Further readings:
+  Cost-effectiveness manuscript
+  NMA manuscript
+  Model update guideline
+---
+
+
+# 0.0 Empty global environment
+```{r}
+rm(list = ls())       # clear memory (removes all the variables from the workspace)
+options(scipen = 999) # set reporting numbers to non-scientific
+```
+
+# 01 Load packages
+
+```{r, warning = F, message = F}
+if (!require('pacman')) install.packages('pacman'); library(pacman) # use this package to conveniently install other packages
+ # load (install if required) packages from CRAN
+
+ p_load("here", "dplyr", "ggplot2","flexsurv",  "tictoc", "truncnorm", "tidyr", "MASS", "bindata", "doSNOW", "doParallel", "scales", "reshape2")  
+ 
+  # load (install if required) packages from GitHub
+ # install_github("DARTH-git/dampack", force = TRUE) Uncomment if there is a newer version
+ p_load_gh("DARTH-git/dampack") 
+ p_load_gh("DARTH-git/darthtools")
+```
+
+
+# 02.0 Load functions and data
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+
+# Load functions (df_X, Effs, Costs & Microsim are left in this main .rmd for ease of comprehension of code)
+source(here::here("Functions", "functions.R")) 
+
+# Settings
+include_AE <- "yes"         # Include discontinuation due to adverse events "yes" or "no" (base case = yes)
+prices     <- "discounted"  #"list" for list prices or "discounted" for prices based on Vektis declaration data (including discounts). All 2023 Euros.
+
+
+# Survival objects for time to active disease based on the IBD-ZL or ICC cohort
+load(here::here("Input", "FirstLine_TTDA.RData"))                       # Line 1, thiopurine, IBDZL, n = 184, Gamma
+s_df_tp_FL1     <- best_model$Gamma
+load(here::here("Input", "SecondLine_TTAD_antiTNF_naive_IFX.RData"))    # Line 2+, IFX, biologic naive, IBDZL, n = 104, Lognormal
+s_df_tp_FL2_nai <- best_model$Lognormal
+load(here::here("Input", "SecondLine_TTAD_antiTNF_exp_ICC_uste.RData")) # Line 2+ ustekinumab, biologic exposed, ICC, n = 139, Lognormal
+s_df_tp_FL2_exp <- best_model$Lognormal
+load(here::here("Input", "FirstLine_TTAS.RData"))                       # active surgery, IBDZL, n = 198, Exponential, no covariates
+s_df_tp_sur_AD <- best_model$Exponential
+load(here::here("Input", "FirstLine_TTOS.RData"))                       # other surgery, IBDZL, n = 178, Lognormal
+s_df_tp_sur_OS <- best_model$Lognormal
+
+# Transition probabilities estimated on survival objects (code in section 5.1)
+load(here::here("input", "df_tp_RWD.RData"))
+
+df_tp_FL1_AZA    <- df_tp_FL1        #line 1
+df_tp_FL2_IFX    <- df_tp_FL2_nai    #line 2 or 3 if biologic naive 
+df_tp_FL2_UST    <- df_tp_FL2_exp    #line 2, 3 or 4 if biologic exposed
+df_tp_sur_other  <- df_tp_OS         #other surgery
+df_tp_sur_active <- df_tp_AS$transprob[2] #surgery due to active disease (exponential model without covariates so only 1 value)
+  
+```
+
+# 02.1 Load NMA data
+Reference treatments induction (ind) of response (RES) or remission (REM):
+- Placebo because the mean induction events are taken from placebo arm of trials.
+
+Reference treatments maintenance (mai) of RES or REM: 
+- AZA  for biologically naive in line 1, 
+- IFX5 for biologically naive line 2, 
+- UST  for biologically exposed / line 3
+
+
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+
+# Induction of remission 
+df_NMA_ind_REM_nai           <- read.csv(here::here("Output", "df_TE_ind_REM_nai.csv"))
+df_NMA_ind_REM_nai$type      <- "df_NMA_ind_REM_nai"
+df_NMA_ind_REM_exp           <- read.csv(here::here("Output", "df_TE_ind_REM_exp.csv"))
+df_NMA_ind_REM_exp$type      <- "df_NMA_ind_REM_exp"
+
+# Maintenance 
+df_NMA_mai_REMRES_nai        <- read.csv(here::here("Output", "df_TE_mai_REMRES_nai_AZA.csv"))
+df_NMA_mai_REMRES_nai$type   <- "df_NMA_mai_REMRES_nai"
+df_NMA_mai_REMRES_naiL2      <- read.csv(here::here("Output", "df_TE_mai_REMRES_nai_IFX.csv"))
+df_NMA_mai_REMRES_naiL2$type <- "df_NMA_mai_REMRES_naiL2"
+df_NMA_mai_REMRES_exp        <- read.csv(here::here("Output", "df_TE_mai_REMRES_exp_UST.csv"))
+df_NMA_mai_REMRES_exp$type   <- "df_NMA_mai_REMRES_exp"
+
+# Adverse events
+df_NMA_AE_nai                <-  read.csv(here::here("Output", "df_NMA_AE_nai.csv"))
+df_NMA_AE_nai$type           <- "df_NMA_AE_nai"
+df_NMA_AE_exp                <-  read.csv(here::here("Output", "df_NMA_AE_exp.csv"))
+df_NMA_AE_exp$type           <- "df_NMA_AE_exp"
+
+# Read in mean withdrawal (all cause discontinuation) and maintenance rates for placebo from NMA trials
+df_placebo_AE <-  read.csv(here::here("Output", "df_mean_placebo_AE_rates.csv"))
+
+# Load Cov.random objects NMA for the PSA 
+load(here::here("Output", "NMA_PSA_ind_REM_nai.RData"))
+load(here::here("Output", "NMA_PSA_ind_REM_exp.RData"))
+load(here::here("Output", "NMA_PSA_mai_REMRES_nai.RData"))
+load(here::here("Output", "NMA_PSA_mai_REMRES_nai_L2.RData"))
+load(here::here("Output", "NMA_PSA_mai_REMRES_exp.RData"))
+load(here::here("Output", "NMA_PSA_AE_nai.RData"))
+load(here::here("Output", "NMA_PSA_AE_exp.RData"))
+
+# Combine all NMA data in a data frame
+all_NMA_data <- rbind(df_NMA_ind_REM_nai, df_NMA_ind_REM_exp,
+                      df_NMA_mai_REMRES_nai, df_NMA_mai_REMRES_naiL2, df_NMA_mai_REMRES_exp, df_NMA_AE_nai, df_NMA_AE_exp)
+
+# Add abbreviated names to the combined data frame to avoid repetition
+all_NMA_data$curTrt <- ifelse(all_NMA_data$Treatment == "Azathioprine 2.5 mg/kg",   "AZA",
+                       ifelse(all_NMA_data$Treatment == "Azathioprine 2 mg/kg",     "AZA",
+                       ifelse(all_NMA_data$Treatment == "Azathioprine 2-2.5 mg/kg", "AZA",
+                       ifelse(all_NMA_data$Treatment == "Adalimumab 40 mg" & all_NMA_data$type == "df_NMA_ind_REM_nai" ,   "ADA20", #maintenance always 40mg
+                       ifelse(all_NMA_data$Treatment == "Adalimumab 40 mg" & all_NMA_data$type != "df_NMA_ind_REM_nai" ,   "ADA40", #maintenance always 40mg
+                       ifelse(all_NMA_data$Treatment == "Adalimumab 160 mg",         "ADA40", #because starts with 160 mg to 80 mg ends with 40 mg (default dosing)
+                       ifelse(all_NMA_data$Treatment == "Adalimumab + Azathioprine 160 mg + 25-50 mg",                           "ADA+AZA",
+                       ifelse(all_NMA_data$Treatment == "Adalimumab + Azathioprine / 6-mercaptopurine 40 mg + 25-50 mg / 30 mg", "ADA+AZA",
+                       ifelse(all_NMA_data$Treatment == "Etrolizumab 105 mg",       "ETR105",
+                       ifelse(all_NMA_data$Treatment == "Etrolizumab 210 mg",       "ETR210",
+                       ifelse(all_NMA_data$Treatment == "Infliximab 5 mg/kg",       "IFX5",
+                       ifelse(all_NMA_data$Treatment == "Infliximab 10 mg/kg",      "IFX10",
+                       ifelse(all_NMA_data$Treatment == "Infliximab + Azathioprine 5 mg/kg + 2-2.5 mg/kg","IFX+AZA",
+                       ifelse(all_NMA_data$Treatment == "Methotrexate 25 mg",       "MTX",
+                       ifelse(all_NMA_data$Treatment == "Methotrexate 15 mg",       "MTX",
+                       ifelse(all_NMA_data$Treatment == "Risankizumab 600 mg",      "RIS",
+                       ifelse(all_NMA_data$Treatment == "Risankizumab 360 mg",      "RIS",
+                       ifelse(all_NMA_data$Treatment == "Upadacitinib 45 mg",       "UPA",
+                       ifelse(all_NMA_data$Treatment == "Upadacitinib 30 mg",       "UPA", #change 30 to 15 for other dosage
+                       ifelse(all_NMA_data$Treatment == "Ustekinumab 6 mg/kg",      "UST",
+                       ifelse(all_NMA_data$Treatment == "Ustekinumab 90 mg",        "UST", 
+                       ifelse(all_NMA_data$Treatment == "Vedolizumab 300 mg",       "VED",
+                       ifelse(all_NMA_data$Treatment == "Vedolizumab 108 mg",       "VED", "noabbr")))))))))))))))))))))))
+
+# Remake original dataframes including the abbreviations for treatment                    
+df_NMA_ind_REM_nai_L1      <- all_NMA_data[all_NMA_data$type == "df_NMA_ind_REM_nai", ]
+df_NMA_ind_REM_nai_L2      <- all_NMA_data[all_NMA_data$type == "df_NMA_ind_REM_nai", ]
+df_NMA_ind_REM_exp_L2      <- all_NMA_data[all_NMA_data$type == "df_NMA_ind_REM_exp", ]
+df_NMA_ind_REM_exp_L3      <- all_NMA_data[all_NMA_data$type == "df_NMA_ind_REM_exp", ]
+df_NMA_ind_REM_exp_L4      <- all_NMA_data[all_NMA_data$type == "df_NMA_ind_REM_exp", ]
+df_NMA_ind_REM_exp_L5      <- all_NMA_data[all_NMA_data$type == "df_NMA_ind_REM_exp", ]
+df_NMA_mai_REMRES_nai_L1   <- all_NMA_data[all_NMA_data$type == "df_NMA_mai_REMRES_nai", ]
+df_NMA_mai_REMRES_nai_L2 <- all_NMA_data[all_NMA_data$type == "df_NMA_mai_REMRES_naiL2", ]
+df_NMA_mai_REMRES_exp_L2   <- all_NMA_data[all_NMA_data$type == "df_NMA_mai_REMRES_exp", ]
+df_NMA_mai_REMRES_exp_L3   <- all_NMA_data[all_NMA_data$type == "df_NMA_mai_REMRES_exp", ]
+df_NMA_mai_REMRES_exp_L4   <- all_NMA_data[all_NMA_data$type == "df_NMA_mai_REMRES_exp", ]
+df_NMA_mai_REMRES_exp_L5   <- all_NMA_data[all_NMA_data$type == "df_NMA_mai_REMRES_exp", ]
+df_NMA_AE_nai           <- all_NMA_data[all_NMA_data$type == "df_NMA_AE_nai", ]
+df_NMA_AE_exp           <- all_NMA_data[all_NMA_data$type == "df_NMA_AE_exp", ]
+df_NMA_AE_exp           <- df_NMA_AE_exp[df_NMA_AE_exp$Treatment != "Vedolizumab 300 mg", ] #300mg is redundant: maintanance dosing is 108 mg and AE related discontinuation is based on maintenance trials
+
+# Assume discontinuation rates of other treatments when missing in the AE NMA
+df_NMA_AE_exp[nrow(df_NMA_AE_exp)+1,]      <- df_NMA_AE_exp[df_NMA_AE_exp$curTrt == "ADA+AZA", ] # Assume IFX+AZA discontinuation is equal to ADA+AZA exposed
+df_NMA_AE_exp$curTrt[ nrow(df_NMA_AE_exp)] <- "IFX+AZA"
+df_NMA_AE_exp[nrow(df_NMA_AE_exp)+1,]      <- df_NMA_AE_exp[df_NMA_AE_exp$curTrt == "ADA40", ] # Assume IFX5 discontinuation is equal to ADA40
+df_NMA_AE_exp$curTrt[ nrow(df_NMA_AE_exp)] <- "IFX5"
+df_NMA_AE_exp[nrow(df_NMA_AE_exp)+1,]      <- df_NMA_AE_nai[df_NMA_AE_nai$curTrt == "UST", ] # Assume same UST discontinuation in exposed and naive subgroups 
+df_NMA_AE_exp$curTrt[ nrow(df_NMA_AE_exp)] <- "UST"
+
+# Add discontinuation RR = 0 (zero) when patients are either dead (D) or off treatment (no-treatment)
+df_NMA_AE_nai[nrow(df_NMA_AE_nai)+1,] <- 0 
+df_NMA_AE_nai$curTrt[ nrow(df_NMA_AE_nai)] <- "D"
+df_NMA_AE_nai[nrow(df_NMA_AE_nai)+1,] <- 0 
+df_NMA_AE_nai$curTrt[ nrow(df_NMA_AE_nai)] <- "no-treatment"
+df_NMA_AE_exp[nrow(df_NMA_AE_exp)+1,] <- 0 
+df_NMA_AE_exp$curTrt[ nrow(df_NMA_AE_exp)] <- "D"
+df_NMA_AE_exp[nrow(df_NMA_AE_exp)+1,] <- 0 
+df_NMA_AE_exp$curTrt[ nrow(df_NMA_AE_exp)] <- "no-treatment"
+
+```
+
+# 03 Input model parameters
+
+## 03.1 Model settings, probabilities, costs and utilities
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+set.seed(1)  # set the seed 
+
+# Model structure 
+age                             <- 39                                     # start age: mean age at diagnosis Jeuring et al. (2017) Era 2006-2011
+sd_age                          <- 16.1                                   # SD age: mean age at diagnosis Jeuring et al. (2017) Era 2006-2011
+max_age                         <- 108                                    # max age based on max in Human Mortality Database
+prop_female                     <- 1-0.3025                               # proportion females: baseline data IBD-ZL
+cl_wk                           <- 12                                     # cycle length in weeks
+n_t                             <- (max_age-age)*(52/cl_wk)               # time horizon in cl_wk week-cycles
+n_cycles                        <- n_t                                    # number of cycles
+n_i                             <- 30000                                  # number of simulated individuals # >=10.000 recommended for base case
+v_n                             <- c("ACT", "REM", "REM_ps", "D")  # the model states names
+v_names_states                  <- v_n                                    # variable needed for plot_trace_microsim
+n_states                        <- length(v_n)                            # the number of health states
+d_rc                            <- 0.030                                  # discount rate costs
+d_re                            <- 0.015                                  # discount rate effects
+d_rc                            <- (1+d_rc)^(cl_wk/52)-1                  # discount rate costs to x-weekly
+d_re                            <- (1+d_re)^(cl_wk/52)-1                  # discount rate effects to x-weekly
+v_dwc                           <- 1 / ((1 + d_rc) ^ (0:n_t))             # per period discount weight costs
+v_dwe                           <- 1 / ((1 + d_re) ^ (0:n_t))             # per period discount weight effects
+v_names_str                     <- c("less_eff", "more_eff")              # strategy names
+n_str                           <- length(v_names_str)                    # number of strategies
+v_names_lines                   <- c("TRT1", "TRT2", "TRT3", "TRT4", "TRT5", "surgery", "no-treatment", "dead") # line names
+
+###########          SIMULATE BASELINE COHORT            #################################################################
+
+
+# Sample a patient population of n_i from IBD-ZL first line patients using covariance matrix
+load(here::here("input", "FirstLine_simulate_baseline-1.Rdata"))
+baseline                        <- as.data.frame(rmvbin(n_i, df_mu, sigma = df_cor))
+colnames(baseline)              <- colnames(df_cor)
+baseline$peri_a_Y               <- ifelse(baseline$peri_a_N == 1, 0, 1) # recode no and yes 
+
+###########           EVENT PROBABILITIES            #################################################################
+
+# Placebo probabilities for remission (p_ACTREM) based on meta-analysis
+p_ACTREM_nai                    <- 0.2158 # 95% CI [0.1691; 0.2712]
+p_ACTREM_exp                    <- 0.1525 # 95% CI [0.1102; 0.2073]
+
+# Calculate beta parameters for use in PSA
+beta_params_p_ACTREM_nai        <- beta_params(p_ACTREM_nai, ((0.2712 - 0.1691) / (2*1.96)))
+beta_params_p_ACTREM_exp        <- beta_params(p_ACTREM_exp, ((0.2073 - 0.1102) / (2*1.96)))
+
+# Placebo probabilities for all cause discontinuation based on meta-analysis
+p_disc_placebo_nai              <- 0.0769 # 95% CI [0.0516; 0.1130]
+p_disc_placebo_exp              <- 0.0730 # 95% CI [0.0490; 0.1073]     
+
+# Adjust probabilities to cycle length
+r_disc_placebo_nai              <- (-log(1-p_disc_placebo_nai)/(df_placebo_AE$FU.duration[1])* cl_wk) 
+r_disc_placebo_exp              <- (-log(1-p_disc_placebo_exp)/(df_placebo_AE$FU.duration[2])* cl_wk) 
+
+# Convert back to probability or to 0 if adverse events are not included
+p_disc_placebo_nai              <- ifelse(include_AE == "no", 0, (1-exp(-r_disc_placebo_nai))) 
+p_disc_placebo_exp              <- ifelse(include_AE == "no", 0, (1-exp(-r_disc_placebo_exp))) 
+
+# Annual probabilities of death
+# Hazard ratio excess mortality: derived from Swedish cohort study of Olén et al. 2020 in Gut
+HR_EM_CD_F                      <- 1.8 # CI: 1.7 - 1.8
+HR_EM_CD_M                      <- 1.5 # CI: 1.4 - 1.5
+
+# Background mortality in the general population weighted by the sex distribution of the patient population
+# Formula to adapt to cycle length based on Chhatwal et al. (2017): https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5045797/
+# We used 2019 to avoid bias from COVID-19
+df_mort                         <- read.csv(here::here("input", "sterfte_NL_2019.csv"), sep = ";", header = TRUE)
+df_mort$r_mort                  <- prop_female*df_mort$Female*HR_EM_CD_F + (1-prop_female)*df_mort$Male*HR_EM_CD_M
+df_mort$r_mort_cl               <- df_mort$r_mort*(1/(52/cl_wk)) # convert annual mortality rate to x-weekly mortality rate
+df_mort$p_mort                  <- 1-exp(-df_mort$r_mort_cl)     # convert rate to probability
+
+###########           COSTS            #################################################################
+
+# Costs per 12-weekly period using list prices from 2023
+if(prices == "list"){
+  df_c_trt                    <- read.csv(here::here("input", "list_prices.csv" ), sep = ",", header = T)
+  colnames(df_c_trt)          <- c("curTrt", "Induction", "Maintenance")
+  } 
+
+# Costs per 12-weekly period using Vektis declaration data from 2023 year
+if(prices == "discounted"){
+  df_c_trt                    <- read.csv(here::here("input", "declaration_prices.csv"), sep = ",", header = T)
+  colnames(df_c_trt)          <- c("curTrt", "Induction", "Maintenance")
+  } 
+
+
+# No costs for no treatment and dead health states
+df_c_trt[nrow(df_c_trt)+1,1]  <- "no-treatment" 
+df_c_trt[nrow(df_c_trt),2:3]  <- c(0,0)
+df_c_trt[nrow(df_c_trt)+1,1]  <- "D"
+df_c_trt[nrow(df_c_trt),2:3]  <- c(0,0)
+
+# Health state costs
+# Health state costs are the three monthly costs derived from the COIN study, the most comprehensive Dutch study on costs of IBD patients. 
+# We sum the reported costs of outpatient specialists, diagnostic procedures and hospitalisations. 
+# In the publication of this study (van der Valk et al. 2014), 78% of patients were in remission, but results were not split by disease activity status (total sample n=1315 patients). We have re-analysed the source data of the COIN study and report costs by disease activity status as included in the Short-CDAI-Score (0 = remission (CDAI <150), 1 = mild disease (CDAI >150 <220), >2 active disease (CDAI>220)). 
+
+# Reference: van der Valk ME, Mangen MJ, Leenders M, Dijkstra G, van Bodegraven AA, Fidder HH, de Jong DJ, Pierik M, van der Woude CJ, Romberg-Camps MJ, Clemens CH. Healthcare costs of inflammatory bowel disease have shifted from hospitalisation and surgery towards anti-TNFα therapy: results from the COIN study. Gut. 2014 Jan 1;63(1):72-9.
+
+# Correct for consumer price index: 2023 relative to 2015 = 1.2606, 2011 relative to 2015 = 1.0667
+
+# Remission: Short-CDAI = 0
+# Outpatient      52.25 (SD 87)  TotalCostSpec
+# Diagnostics     16.47 (SD 77)  TotalcostDiag
+# Hospitalization 60.72 (SD 634) MTotalCostopname
+c_mrc_2011_REM                      <- 52.25 + 16.47 + 60.72 
+c_mrc_2023_REM                      <- c_mrc_2011_REM*1.0667*1.2606 
+
+
+# Active disease: Short-CDAI > 2
+# Outpatient      156.75 (SD 420)  TotalCostSpec
+# Diagnostics      53.14 (SD 142)  TotalcostDiag
+# Hospitalization 414.26 (SD 1753) MTotalCostopname
+c_mrc_2011_ACT                      <- 156.75 + 53.14 + 414.26 
+c_mrc_2023_ACT                      <- c_mrc_2011_ACT*1.0667*1.2606 
+
+# Simulate data to generate SD for the sum score for use in PSA later on
+df_mrc_REM <- data.frame(outp = rgamma(100000, shape = gamma_params(52.25, 87)$shape, scale = gamma_params(52.25, 87)$scale),
+                         diag = rgamma(100000, shape = gamma_params(16.47, 77)$shape, scale = gamma_params(16.47, 77)$scale), 
+                         hosp = rgamma(100000, shape = gamma_params(60.72, 634)$shape, scale = gamma_params(60.72, 634)$scale))
+
+df_mrc_ACT <- data.frame(outp = rgamma(100000, shape = gamma_params(156.75, 420)$shape, scale = gamma_params(156.75, 420)$scale),
+                         diag = rgamma(100000, shape = gamma_params(53.14, 142)$shape, scale = gamma_params(53.14, 142)$scale), 
+                         hosp = rgamma(100000, shape = gamma_params(414.26, 1753)$shape, scale = gamma_params(414.26, 1753)$scale))
+
+df_mrc_REM$total       <- df_mrc_REM$outp + df_mrc_REM$diag + df_mrc_REM$hosp # create sumscore per health state
+
+df_mrc_ACT$total       <- df_mrc_ACT$outp + df_mrc_ACT$diag + df_mrc_ACT$hosp # create sumscore per health state
+df_mrc_REM$total_2023  <- df_mrc_REM$total*1.0667*1.2606 # CPI correction 2015 to 2023 (see above)
+df_mrc_ACT$total_2023  <- df_mrc_ACT$total*1.0667*1.2606 # CPI correction 2015 to 2023 (see above)
+sd_mrc_2023_REM        <- sd(df_mrc_REM$total_2023) 
+sd_mrc_2023_ACT        <- sd(df_mrc_ACT$total_2023) 
+
+c_ACT                  <- c_mrc_2023_ACT      # cost of one cycle in the active disease state 
+c_REM                  <- c_mrc_2023_REM      # cost of one cycle in the remission state
+c_REM_ps               <- c_mrc_2023_REM      # cost of one cycle in the remission state post surgery
+c_Trt                  <- NULL                # cost for one cycle (will be filled with current treatment costs in 'Costs' function)
+c_Surg                 <- 7235                # cost of 1 surgery event such as ileocaecal resection (DBC-zorgproduct 119899022)
+
+# Dataframe with event type distribution in IBD-ZL
+df_surgery          <- data.frame(event = c("colonic resection", "small intestine resection", "ileocaecal resection", 
+                                            "neoileocaecal resection", "perianal fistula", "hemicolectomy right"), 
+                                  n_event = c(5,4,38,10,29,4)) 
+
+# Select surgery types that are defined as 'other surgery' and weight costs by distribution of surgery types
+df_surgery_o        <- df_surgery[c(1,2,4,5,6),] #only 'other surgery'
+df_surgery_o$weight <- df_surgery_o$n_event/sum(df_surgery_o$n_event)
+df_surgery_o$costs  <- c(11665,  # DBC-zorgproduct 119899008
+                         11665,  # DBC-zorgproduct 119899008
+                         11665,  # DBC-zorgproduct 119899008
+                         7235,   # DBC-zorgproduct 119899022
+                         11665)  # DBC-zorgproduct 119899008
+c_Surg_o            <- weighted.mean(df_surgery_o$costs, df_surgery_o$weight)
+
+
+# Future medical costs
+# All costs using PAID tool, excluding costs for "Ulcers of the stomach and duodenum" and "Inflammatory bowel diseases"
+df_FMC                          <- read.csv(here::here("input", "FMC.csv")) 
+colnames(df_FMC)                <- c("Age", "last_y_m", "last_y_f", "other_y_m", "other_y_f")
+df_FMC[100:120,]                <- df_FMC[nrow(df_FMC),] #repeat at age 99 for age 100 
+df_FMC$Age[100:120]             <- seq(from = 100, to = 120, by = 1)
+
+# Productivity loss based on data from the COIN study (2011) and van Gennep et al. (2021)
+# Reference: Sara van Gennep, Sanne W Evers, Svend T Rietdijk, Marieke E Gielen, Nanne K H de Boer, Krisztina B Gecse, Cyriel I J Ponsioen, Marjolijn Duijvestein, Geert R D’Haens, Angela G E M de Boer, Mark Löwenberg, High Disease Burden Drives Indirect Costs in Employed Inflammatory Bowel Disease Patients: The WORK-IBD Study, Inflammatory Bowel Diseases, Volume 27, Issue 3, March 2021, Pages 352–363, https://doi.org/10.1093/ibd/izaa082
+
+p_with_job                      <- 0.536 # percentage of patients with a job # source: COIN
+v_hours_per_day                 <- 8
+c_hourlywage                    <- 39.88 # average hourly wage 2023, source: Dutch costing manual
+c_hourlywage_unpaid             <- 18.80 # average hourly wage 2023, source: Dutch costing manual
+v_prod_days_unpaid              <- 2.4  # number of days of sick leave from unpaid work of patients in 12 weeks, source COIN study
+v_prod_days_caregiver           <- 5.2  # number of days of sick leave from paid work of caregivers in 12 weeks, source COIN study
+
+c_prod_paid_ACT                 <- p_with_job*14619/52*12 # SD 12636 euro/52*12 = 2916 euro   # Note, cost year unknown, not indexed, between 2017-2020
+c_prod_paid_RESREM              <- p_with_job*4415/52*12 # SD 7871 euro/52*12 = 1816.385 euro # Note, cost year unknown, not indexed, between 2017-2020
+c_prod_days_unpaid              <- v_hours_per_day * c_hourlywage_unpaid * v_prod_days_unpaid      # productivity costs per 12 week period
+c_prod_days_caregiver           <- v_hours_per_day * c_hourlywage* v_prod_days_caregiver           # productivity costs per 12 week period
+
+
+###########           UTILITIES            #################################################################
+# Load quality of life regression model (estimated on EQ-5D-3L from Dutch IB-Dream cohort, n=619 Crohn's disease patients)
+# see the .rmd file "crohn utility analysis" for the model code
+load(here::here("input", "utility_model.RData"))
+u_D                             <- 0                # utility when dead
+
+# Induction periods in weeks (time when you would start maintenance or new treatment if no response, not time of evaluation of response/remission in trial)
+t_ind_IFX5                      <- cl_wk
+t_ind_IFX10                     <- cl_wk
+t_ind_IFX_AZA                   <- cl_wk
+t_ind_ADA40                     <- cl_wk
+t_ind_ADA80                     <- cl_wk
+t_ind_ADA_AZA                   <- cl_wk
+t_ind_VED                       <- cl_wk
+t_ind_UST                       <- cl_wk
+t_ind_UPA                       <- cl_wk
+t_ind_AZA                       <- cl_wk
+t_ind_RIS                       <- cl_wk
+t_ind_MTX                       <- cl_wk
+
+#Store all model relevant paramaters above in a list
+l_params_all                    <- list(
+        age = age,
+        sd_age = sd_age,
+        #Placebo probability to achieve remission inputs
+        p_ACTREM_nai          = p_ACTREM_nai         ,
+        p_ACTREM_exp          = p_ACTREM_exp         ,
+        p_disc_placebo_nai    = p_disc_placebo_nai   ,
+        p_disc_placebo_exp    = p_disc_placebo_exp   ,
+        #Excess mortality inputs
+        HR_EM_CD_F            = HR_EM_CD_F           ,
+        HR_EM_CD_M            = HR_EM_CD_M           ,
+        #Cost inputs
+        c_ACT                 = c_ACT                ,
+        c_REM                 = c_REM                ,
+        c_REM_ps              = c_REM_ps             ,
+        c_Surg                = c_Surg               ,
+        c_Surg_o              = c_Surg_o             ,
+        c_prod_days_unpaid    = c_prod_days_unpaid   ,
+        c_prod_days_caregiver = c_prod_days_caregiver,
+        c_prod_paid_ACT       = c_prod_paid_ACT      ,
+        c_prod_paid_RESREM    = c_prod_paid_RESREM   ,
+        u_D                   = u_D                  ,
+        #NMA inputs
+        df_NMA_ind_REM_nai_L1    = df_NMA_ind_REM_nai_L1    ,
+        df_NMA_ind_REM_nai_L2    = df_NMA_ind_REM_nai_L2    ,
+        df_NMA_ind_REM_exp_L2    = df_NMA_ind_REM_exp_L2    ,
+        df_NMA_ind_REM_exp_L3    = df_NMA_ind_REM_exp_L3    ,
+        df_NMA_ind_REM_exp_L4    = df_NMA_ind_REM_exp_L4    ,
+        df_NMA_ind_REM_exp_L5    = df_NMA_ind_REM_exp_L5    ,
+        df_NMA_mai_REMRES_nai_L1 = df_NMA_mai_REMRES_nai_L1 ,
+        df_NMA_mai_REMRES_nai_L2 = df_NMA_mai_REMRES_nai_L2 ,
+        df_NMA_mai_REMRES_exp_L2 = df_NMA_mai_REMRES_exp_L2 ,
+        df_NMA_mai_REMRES_exp_L3 = df_NMA_mai_REMRES_exp_L3 ,
+        df_NMA_mai_REMRES_exp_L4 = df_NMA_mai_REMRES_exp_L4 ,
+        df_NMA_mai_REMRES_exp_L5 = df_NMA_mai_REMRES_exp_L5 ,
+        df_NMA_AE_nai         = df_NMA_AE_nai        ,
+        df_NMA_AE_exp         = df_NMA_AE_exp        ,
+        df_NMA_AE_exp         = df_NMA_AE_exp        ,
+        df_c_trt              = df_c_trt             ,
+        df_FMC                = df_FMC,
+        cl_wk                 = cl_wk,
+        #Baseline characteristics of patient population (sampled from covariance matrix IBD-ZL registry)
+        baseline              = baseline,
+        #OLS regression on utilities (IB-DREAM registry)
+        df_u_coef             = utility_OLS$coefficients,
+        #transition probabilities
+        df_tp_FL1_AZA         =df_tp_FL1_AZA   ,
+        df_tp_FL2_IFX         =df_tp_FL2_IFX   ,
+        df_tp_FL2_UST         =df_tp_FL2_UST   ,
+        df_tp_sur_other       =df_tp_sur_other ,
+        df_tp_sur_active      =df_tp_sur_active)
+
+
+```
+
+## 03.2 Treatment sequences
+We define two sets of treatment sequences:
+- step up: start with immunomodulator
+- top down: start with biologic
+The two sets cannot be pooled because background 'time to active disease (TTAD)' depends on the previous treatment. 
+A sequence with line 2 ustekinumab TTAD for biologic exposed patients cannot be compared with line 2 IFX TTAD for biologic naive patients.
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+# Define all possible combinations and exclude the sequences that are not clinically plausible
+df_trtseq <- expand.grid(line1 = c("AZA", "MTX", "IFX5", "ADA40", "IFX+AZA", "UST"), 
+                         line2 = c("IFX5", "ADA40", "IFX+AZA", "VED", "UST", "RIS", "UPA"),
+                         line3 = c("IFX5", "ADA40",  "IFX+AZA", "VED", "UST", "RIS", "UPA"),
+                         line4 = c("VED", "UST", "RIS", "UPA"),
+                         line5 = c("VED", "UST", "RIS", "UPA"), stringsAsFactors = FALSE) 
+# ADA80 and ADA+AZA excluded because not in maintenance naive NMA
+# UPA not in line 1, only in line 2 after biologic because not in naive AE NMA
+
+# Exclude sequences with the same treatment in different lines
+df_trtseq <- df_trtseq[!df_trtseq$line1 == df_trtseq$line2,]
+df_trtseq <- df_trtseq[!df_trtseq$line1 == df_trtseq$line3,]
+df_trtseq <- df_trtseq[!df_trtseq$line1 == df_trtseq$line4,]
+df_trtseq <- df_trtseq[!df_trtseq$line1 == df_trtseq$line5,]
+df_trtseq <- df_trtseq[!df_trtseq$line2 == df_trtseq$line3,]
+df_trtseq <- df_trtseq[!df_trtseq$line2 == df_trtseq$line4,]
+df_trtseq <- df_trtseq[!df_trtseq$line2 == df_trtseq$line5,]
+df_trtseq <- df_trtseq[!df_trtseq$line3 == df_trtseq$line4,]
+df_trtseq <- df_trtseq[!df_trtseq$line3 == df_trtseq$line5,]
+df_trtseq <- df_trtseq[!df_trtseq$line4 == df_trtseq$line5,]
+
+# Exclude sequences with more than 1 anti-TNF
+df_trtseq$antiTNF_line1 <- ifelse(df_trtseq$line1 == "IFX5" | df_trtseq$line1 == "ADA40" | df_trtseq$line1 == "IFX+AZA" | df_trtseq$line1 == "ADA+AZA", 1, 0)
+df_trtseq$antiTNF_line2 <- ifelse(df_trtseq$line2 == "IFX5" | df_trtseq$line2 == "ADA40" | df_trtseq$line2 == "IFX+AZA" | df_trtseq$line2 == "ADA+AZA",  1, 0)
+df_trtseq$antiTNF_line3 <- ifelse(df_trtseq$line3 == "IFX5" | df_trtseq$line3 == "ADA40" | df_trtseq$line3 == "IFX+AZA" | df_trtseq$line3 == "ADA+AZA", 1, 0)
+df_trtseq$antiTNF_line4 <- ifelse(df_trtseq$line4 == "IFX5"| df_trtseq$line4 == "ADA40" | df_trtseq$line4 == "IFX+AZA" | df_trtseq$line4 == "ADA+AZA", 1, 0)
+df_trtseq$antiTNF_line5 <- ifelse(df_trtseq$line5 == "IFX5"| df_trtseq$line5 == "ADA40" | df_trtseq$line5 == "IFX+AZA" | df_trtseq$line5 == "ADA+AZA", 1, 0)
+df_trtseq$antiTNF_sum   <- rowSums(df_trtseq[,6:10])
+df_trtseq <- df_trtseq[df_trtseq$antiTNF_sum <2,]
+
+#Exclude sequences with anti-TNF in biologic exposed subgroup (no NMA data)
+df_trtseq <- df_trtseq[!df_trtseq$line3 == "IFX5",]
+df_trtseq <- df_trtseq[!df_trtseq$line3 == "ADA40",]
+df_trtseq <- df_trtseq[!df_trtseq$line3 == "IFX+AZA",]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "UST" & df_trtseq$line2 == "IFX5"),]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "UST" & df_trtseq$line2 == "ADA40"),]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "UST" & df_trtseq$line2 == "IFX+AZA"),]
+
+#Exclude sequences with UPA in line 2 after immunomodulator
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "AZA" & df_trtseq$line2 == "UPA"),]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "MTX" & df_trtseq$line2 == "UPA"),]
+
+# Exclude sequences with RIS or VED after immunomodulators AZA or MTX (because VED and RIS are not included in naive NMA) 
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "AZA" & df_trtseq$line2 == "RIS"),]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "AZA" & df_trtseq$line2 == "VED"),]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "MTX" & df_trtseq$line2 == "RIS"),]
+df_trtseq <- df_trtseq[!(df_trtseq$line1 == "MTX" & df_trtseq$line2 == "VED"),]
+
+# Create variable with names of the treatment sequences for results output
+v_names_str <- c(paste(df_trtseq$line1, df_trtseq$line2, df_trtseq$line3,df_trtseq$line4,df_trtseq$line5,sep="-"))
+
+# Save the treatment sequences in a .csv file
+# write.csv(df_trtseq, here::here("output", "df_trtseq.csv"))
+
+
+df_trtseq_step_up <- df_trtseq[df_trtseq$line1 == "AZA" | df_trtseq$line1 == "MTX",]
+df_trtseq_top_down <- df_trtseq[df_trtseq$line1 != "AZA" & df_trtseq$line1 != "MTX",]
+
+```
+
+# 04 df_X: dataframe with individual level characteristics
+Function to create the dataframe with patient characteristics
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+f_create_df_X <- function(l_params_all){
+  with((l_params_all), {
+
+    set.seed(1)
+    
+# Use 'Age' variable to match binomial age-class in IBZL simulated data data with continuous age (used as input in f_create_df_X)
+ # Match mean age from Jeuring et al with baseline estimate for age at diagnosis
+base_age         <- round(rtruncnorm(n_i, 18, 100, age, sd_age)) # start age
+base_age_under40 <- base_age[base_age < 40] # the population under 40
+base_age_over40  <- base_age[base_age >= 40] # the population over 40
+mean_under40     <- mean(base_age_under40)
+sd_under40       <- sd(base_age_under40)
+mean_over40      <- mean(base_age_over40)
+sd_over40        <- sd(base_age_over40)  
+
+# Patient characteristics
+v_age_diag   <- as.factor(ifelse(baseline$`age_diag_>40` == 1,  ">40", "17-40")) 
+v_age0       <- ifelse(baseline$`age_diag_>40` == 1, round(rtruncnorm(n_i, 41, 100, mean_over40, sd_over40)),
+                                                     round(rtruncnorm(n_i, 18, 40, mean_under40, sd_under40))) # # start age
+v_loc        <- as.factor(ifelse(baseline$loc_L2 == 1, "L2",
+                          ifelse(baseline$loc_L3 == 1, "L3",
+                          ifelse(baseline$loc_L4 == 1, "L4", "L1"))))
+v_fen        <- as.factor(ifelse(baseline$fen_B2 == 1, "B2",
+                          ifelse(baseline$fen_B3 == 1, "B3", "B1")))
+v_sex        <- as.factor(ifelse(baseline$sex_M==1, "M", "F"))      # factor variable of sex for use as covariate in survival models
+v_sex_m      <- ifelse(v_sex =="M", 1, 0)                           # numeric version of sex for use in Cost function
+v_sex_f      <- ifelse(v_sex =="F", 1, 0)                           # numeric version of sex for use in Cost function 
+v_smoke      <- as.factor(ifelse(baseline$smoke_N == 1, "N", "Y"))  # factor variable for use as covariate in survival models
+v_smoke_Y    <- ifelse(baseline$smoke_N == 0, 1, 0)                 # numeric variable for use in utility regression
+v_peri_a     <- as.factor(ifelse(baseline$peri_a_N == 1, "N", "Y")) # factor variable for use as covariate in survival models
+
+# Treatment characteristics
+v_line0      <- rep(1, n_i)                     # all patients start in line 1
+v_curTrt     <- as.character(rep("ADA40", n_i)) # placeholder, will be overwritten when the simulation starts
+v_ind        <- rep(0, n_i)                     # variable for induction treatment
+v_t_ind      <- rep(0, n_i)                     # variable for time on induction treatment 
+v_sur_o      <- rep(0, n_i)                     # all patients start without surgery other
+
+# Helper vectors
+v_ind_c     <- rep(0, n_i)                    # variable for induction costs when in active disease 1=yes 0=no
+v_mai_c     <- rep(0, n_i)                    # variable for maintenance costs when in active disease 1=yes 0=no
+v_ToT       <- 1                              # time on treatment
+v_disc      <- rep(0, n_i)                    # variable to indicate if a patient has discontinued treatment 
+v_sur_once  <- rep(0, n_i)                    # counter to make sure costs of surgery due to active disease are only applied once
+v_ileo_REM  <- rep(0, n_i)                    # variable to determine in MicroSim if you are currently in ileacaecal caused remission (1 or 0)
+v_cur_state <- rep("ACT", n_i)                # variable to inform current health state (to inform surgery survival model)
+v_death     <- rep(0, n_i)                    # variable to capture the year of death
+v_work      <- rep(0, n_i)                    # variable to capture if someone is of working age for productivity losses
+
+# Store it all in a dataframe
+df_X     <- data.frame(ID                   = 1:n_i, 
+                       Age                  = v_age0, 
+                       Age_cl               = v_age0, 
+                       age_diag             = v_age_diag,
+                       loc                  = v_loc, 
+                       fen                  = v_fen, 
+                       sex                  = v_sex,
+                       sex_m                = v_sex_m,
+                       sex_f                = v_sex_f,
+                       smoke                = v_smoke,
+                       smoke_Y              = v_smoke_Y,
+                       peri_a               = v_peri_a,
+                       Line                 = v_line0,  
+                       curTrt               = v_curTrt, 
+                       ind                  = v_ind,
+                       t_ind                = v_t_ind,
+                       sur_o                = v_sur_o, 
+                       t_ind_c              = v_ind_c,
+                       t_mai_c              = v_mai_c,
+                       time                 = v_ToT,
+                       disc                 = v_disc,
+                       sur_once             = v_sur_once,
+                       ileocaecal_remission = v_ileo_REM,
+                       cur_state            = v_cur_state,
+                       work                 = v_work,
+                       death                = v_death)
+
+df_X <- cbind(df_X, baseline) # add original dummy covariates for use in regression models 
+
+return(df_X)
+ })#end of with l_params_all
+}
+
+# Specify the first health state, do this in a function so it can be used within MicroSim
+f_v_M_init <- function(){
+  v_M_init  <- rep("ACT", n_i) # everyone starts in the active disease state
+  return(v_M_init)
+}
+```
+
+# 05 Define Simulation Functions
+
+## 05.01 Survival extraction function 
+Extract subgroup specific transition probabilities from time to event models.
+Do not run unless new cycle length / number of treatment lines / survival models / covariates (has long runtime)
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+#times  <- seq(0, n_t, 1) # Extrapolation period
+#
+## Generate all potential combinations of covariates
+## Note: these need to be exactly the same as what goes into the survival model and what is stored in df_X
+#all_covariates <- expand.grid(age_diag = as.factor(c("17-40", ">40")),
+#                              loc      = as.factor(c("L1", "L2", "L3", "L4")),
+#                              fen      = as.factor(c("B1", "B2", "B3")),
+#                              sex      = as.factor(c("M", "F")),
+#                              smoke    = as.factor(c("Y", "N")), 
+#                              peri_a   = as.factor(c("Y", "N")))
+#
+#
+#
+# # LINE 1 
+#
+## Generate survival probabilities for all t in times for all covariate combinations
+#cumhaz_covs1 <- summary(s_df_tp_FL1, t = times, newdata = all_covariates, type = "survival", tidy = TRUE)
+#
+## Assign numbers to each type of patient
+#cumhaz_covs1$group <- rep(seq(from = 1, to = nrow(all_covariates)), each = length(times)) #note, 1 to n is number of patients to #distinguish
+#
+## Store results per type of patient (group) in a list
+#  temp_surv1 <- list()
+#  for(i in 1:nrow(all_covariates)){
+#  temp_surv1[[i]] <- cumhaz_covs1[cumhaz_covs1$group == i,]
+#}
+#
+## Derive transition probabilities from survival functions and store them in the same list
+#  for(i in 1:nrow(all_covariates)){
+#    temp_surv1[[i]]$transprob <- c(NA, trans_prob(temp_surv1[[i]]$est))
+#      }
+#
+## Return the transition probabilities to a dataframe
+#  df_tp_FL1 <- rbindlist(temp_surv1)
+# 
+#  # LINE 2 biologic naive
+#
+## Generate survival probabilities for all t in times for all covariate combinations
+#cumhaz_covs2 <- summary(s_df_tp_FL2_nai, t = times, newdata = all_covariates, type = "survival", tidy = TRUE)
+#
+## Assign numbers to each type of patient
+#cumhaz_covs2$group <- rep(seq(from = 1, to = nrow(all_covariates)), each = length(times)) #note, 1 to n is number of patients to #distinguish
+#
+## Store results per type of patient (group) in a list
+#  temp_surv2 <- list()
+#  for(i in 1:nrow(all_covariates)){
+#  temp_surv2[[i]] <- cumhaz_covs2[cumhaz_covs2$group == i,]
+#}
+#
+## Derive transition probabilities from survival functions and store them in the same list
+#  for(i in 1:nrow(all_covariates)){
+#    temp_surv2[[i]]$transprob <- c(NA, trans_prob(temp_surv2[[i]]$est))
+#      }
+#
+## Return the transition probabilities to a dataframe
+#df_tp_FL2_nai <- rbindlist(temp_surv2)
+#
+# # LINE 2 biologic exposed (also used for line 3 and 4) 
+#
+## Generate survival probabilities for all t in times for all covariate combinations
+#cumhaz_covs3 <- summary(s_df_tp_FL2_exp, t = times, newdata = all_covariates, type = "survival", tidy = TRUE)
+#
+## Assign numbers to each type of patient
+#cumhaz_covs3$group <- rep(seq(from = 1, to = nrow(all_covariates)), each = length(times)) #note, 1 to n is number of patients to #distinguish
+#
+## Store results per type of patient (group) in a list
+#  temp_surv3 <- list()
+#  for(i in 1:nrow(all_covariates)){
+#  temp_surv3[[i]] <- cumhaz_covs3[cumhaz_covs3$group == i,]
+#}
+#
+## Derive transition probabilities from survival functions and store them in the same list
+#  for(i in 1:nrow(all_covariates)){
+#    temp_surv3[[i]]$transprob <- c(NA, trans_prob(temp_surv3[[i]]$est))
+#      }
+#
+## Return the transition probabilities to a dataframe
+#  df_tp_FL2_exp <- rbindlist(temp_surv3)
+#  
+# # Surgery OTHER 
+#
+## Generate survival probabilities for all t in times for all covariate combinations
+#cumhaz_covs4 <- summary(s_df_tp_sur_OS, t = times, newdata = all_covariates, type = "survival", tidy = TRUE)
+#
+## Assign numbers to each type of patient
+#cumhaz_covs4$group <- rep(seq(from = 1, to = nrow(all_covariates)), each = length(times)) #note, 1 to n is number of patients to #distinguish
+#
+## Store results per type of patient (group) in a list
+#  temp_surv4 <- list()
+#  for(i in 1:nrow(all_covariates)){
+#  temp_surv4[[i]] <- cumhaz_covs4[cumhaz_covs4$group == i,]
+#}
+#
+## Derive transition probabilities from survival functions and store them in the same list
+#  for(i in 1:nrow(all_covariates)){
+#    temp_surv4[[i]]$transprob <- c(NA, trans_prob(temp_surv4[[i]]$est))
+#      }
+#
+## Return the transition probabilities to a dataframe
+#  df_tp_OS <- rbindlist(temp_surv4)
+#  
+#    # Surgery ACTIVE DISEASE (note, no covariates)
+## Generate survival probabilities for all t in times for all covariate combinations
+#cumhaz_covs5 <- summary(s_df_tp_sur_AD, t = times, newdata = all_covariates, type = "survival", tidy = TRUE)
+#
+## Assign numbers to each type of patient
+#cumhaz_covs5$group <- rep(seq(from = 1, to = nrow(all_covariates)), each = length(times)) #note, 1 to n is number of patients to #distinguish
+#
+## Store results per type of patient (group) in a list
+#  temp_surv5 <- list()
+#  for(i in 1:nrow(all_covariates)){
+#  temp_surv5[[i]] <- cumhaz_covs5[cumhaz_covs5$group == i,]
+#}
+#
+## Derive transition probabilities from survival functions and store them in the same list
+#  for(i in 1:nrow(all_covariates)){
+#    temp_surv5[[i]]$transprob <- c(NA, trans_prob(temp_surv5[[i]]$est))
+#      }
+#
+## Return the transition probabilities to a dataframe
+#  df_tp_AS <- rbindlist(temp_surv5)
+#  
+#     
+#  # Save transition probabilities per line (to avoid having to run the above code every time)
+# # save(df_tp_FL1, df_tp_FL2_nai, df_tp_FL2_exp, df_tp_AS, df_tp_OS, file = here::here("input", "df_tp_RWD.RData"))
+#
+
+  
+```
+ 
+## 05.02 Function to extract the transition probability for a specific patient based on covariates from saved output of 05.01
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+f_extract_prob <- function(df_X, t ){
+  # LINE 1
+  df_tp_FL1_join <- inner_join(df_X, df_tp_FL1_AZA, by = c("age_diag", "loc", "fen", "sex", "smoke", "peri_a", "time"))
+
+  # LINE 2
+  df_tp_FL2_join_nai <- inner_join(df_X, df_tp_FL2_IFX, by = c("age_diag", "loc", "fen", "sex", "smoke", "peri_a", "time")) 
+  df_tp_FL2_join_exp <- inner_join(df_X, df_tp_FL2_UST, by = c("age_diag", "loc", "fen", "sex", "smoke", "peri_a", "time"))
+
+  # surgery other
+  df_tp_sur_o_join <- inner_join(df_X, df_tp_sur_other, by = c("age_diag", "loc", "fen", "sex","smoke", "peri_a", "time"))
+
+  # surgery due to active disease (note, no covariates)
+  df_tp_sur_a_join <- rep(df_tp_sur_active, nrow(df_tp_sur_o_join))
+
+
+  # Combine transition probabilities to go to active disease of all lines in one dataframe
+   df_tp <- data.frame(p_FL1       = df_tp_FL1_join$transprob,
+                       p_FL2_nai   = df_tp_FL2_join_nai$transprob,
+                       p_FL2_exp   = df_tp_FL2_join_exp$transprob, #this is also used for line 3 and for which are always biologically exposed
+                       p_SUR_o     = df_tp_sur_o_join$transprob,
+                       p_SUR_a     = df_tp_sur_a_join)
+  
+  return(df_tp) 
+}
+
+```
+
+## 05.1 Probability function
+
+The function that updates the transition probabilities of every cycle is shown below.
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+Probs <- function(l_params_all, M_t, df_X, t, TRT1 = TRT1, TRT2 = TRT2, TRT3 = TRT3, TRT4 = TRT4, TRT5 = TRT5, df_tp) { 
+# Arguments:
+  # M_t:   health state occupied by individual i at cycle t (character variable)
+  # df_X:  data frame with individual characteristics data 
+  # t:     current cycle 
+  with((l_params_all),{
+  # Returns: 
+  #   transition probabilities for that cycle
+  
+  # Create matrix of state transition probabilities  
+  m_p_t           <- matrix(0, nrow = n_states, ncol = n_i) 
+  rownames(m_p_t) <-  v_n  # give the state names to the rows
+  
+  # Look up probability of dying based on current age
+  df_p_D <- inner_join(df_X, df_mort, by = c("Age"), ) 
+  p_D    <- df_p_D$p_mort # assign probability to p_D
+  
+  # Define transition probabilities for other health states than dead
+  # Use of background TTAD and probabilities on response or remission and RR from NMA depend on biological naive or exposed:
+  # Line 1 = always naive
+  # Line 2 = naive when immunomodulator in line 1 (AZA or MTX) and exposed if biologic in line 1 (only in top down sequences)
+  # Line 3 = always exposed (because it is not possible to have AZA after MTX or vice versa)
+  # Line 4 = always exposed
+  
+  # INDUCTION
+  # Placebo risks on response or remission
+  # Define probabilities in line 2 because they depend on previous line
+  p_ACTREM_line2      <- (if (TRT1 == "AZA" | TRT1 == "MTX") p_ACTREM_nai else p_ACTREM_exp)
+
+  # Select NMA for line 2 and 3 based on previous line
+  df_NMA_ind_REM_L2    <- (if (TRT1 == "AZA" | TRT1 == "MTX") df_NMA_ind_REM_nai_L2 else df_NMA_ind_REM_exp_L2)
+
+  # Adjust placebo risk with RR of remission from induction NMA
+  p_ACTREM <- NULL
+  p_ACTREM[df_X$curTrt == TRT1] <- p_ACTREM_nai * df_NMA_ind_REM_nai_L1$RR[df_NMA_ind_REM_nai_L1$curTrt == TRT1]
+  p_ACTREM[df_X$curTrt == TRT2] <- p_ACTREM_line2 * df_NMA_ind_REM_L2$RR[df_NMA_ind_REM_L2$curTrt == TRT2]
+  p_ACTREM[df_X$curTrt == TRT3] <- p_ACTREM_exp * df_NMA_ind_REM_exp_L3$RR[df_NMA_ind_REM_exp_L3$curTrt == TRT3]
+  p_ACTREM[df_X$curTrt == TRT4] <- p_ACTREM_exp * df_NMA_ind_REM_exp_L4$RR[df_NMA_ind_REM_exp_L4$curTrt == TRT4]
+  p_ACTREM[df_X$curTrt == TRT5] <- p_ACTREM_exp * df_NMA_ind_REM_exp_L5$RR[df_NMA_ind_REM_exp_L5$curTrt == TRT5]
+  p_ACTREM[df_X$curTrt == "no-treatment"] <- 0
+  p_ACTREM[df_X$curTrt == "D"] <- 0
+  
+   # Correction of probabilities for use in PSA 
+   # Sometimes RR's of >8 are drawn as the NMA is uncertain, and p_ACTREM is also simulated. The combination can give probabilities >1
+  p_ACTREM[p_ACTREM >=1] <- 0.99
+   
+  # MAINTENANCE
+  # Background TTAD models 
+  p_FL1    <- df_tp$p_FL1 
+  p_FL2    <- (if (TRT1 == "AZA" | TRT1 == "MTX") df_tp$p_FL2_nai else df_tp$p_FL2_exp)
+  p_FL3    <- df_tp$p_FL2_exp
+  p_FL4    <- df_tp$p_FL2_exp
+  p_FL5    <- df_tp$p_FL2_exp
+  p_SUR_a  <- df_tp$p_SUR_a #Surgery due to active disease
+
+  
+  # Select NMA for line 2 and 3 based on previous line
+  df_NMA_mai_REMRES_L2 <- (if (TRT1 == "AZA" | TRT1 == "MTX") df_NMA_mai_REMRES_nai_L2 else df_NMA_mai_REMRES_exp_L2)
+
+  # RR from remission or response to active disease from maintenance NMAs
+  p_REMACT <- ifelse(df_X$curTrt == TRT1, p_FL1*df_NMA_mai_REMRES_nai_L1$RR[df_NMA_mai_REMRES_nai_L1$curTrt == TRT1],  
+              ifelse(df_X$curTrt == TRT2, p_FL2*df_NMA_mai_REMRES_L2$RR[df_NMA_mai_REMRES_L2$curTrt == TRT2],      
+              ifelse(df_X$curTrt == TRT3, p_FL3*df_NMA_mai_REMRES_exp_L3$RR[df_NMA_mai_REMRES_exp_L3$curTrt == TRT3],  
+              ifelse(df_X$curTrt == TRT4, p_FL4*df_NMA_mai_REMRES_exp_L4$RR[df_NMA_mai_REMRES_exp_L4$curTrt == TRT4],
+              ifelse(df_X$curTrt == TRT5, p_FL5*df_NMA_mai_REMRES_exp_L5$RR[df_NMA_mai_REMRES_exp_L5$curTrt == TRT5],0)))))  
+
+  
+  # Only apply the probability to have response at the end of the induction period
+  p_ACTREM    <- ifelse(df_X$ind == df_X$t_ind, p_ACTREM,  0) 
+  p_ACTREM_ps <- p_SUR_a # probability derived from exponential survival function without covariates (best fitting function on IDB-ZL registry data)
+    
+  # For those who had active disease related surgery (and thus enter the remission health state), the risk of getting active disease is always equal to that of IFX5 (LIR!C trial) as we assume this is only for the ileocaecal resection (other surgery not treatment related)
+  p_REM_psACT <- p_FL1*df_NMA_mai_REMRES_nai_L1$RR[df_NMA_mai_REMRES_nai_L1$curTrt == "IFX5"] 
+  
+  # Fill the transition probability matrix with the appropriate probabilities
+  # NB: It is not possible to go from remission to response or vice versa
+  m_p_t[, M_t == "ACT"]     <- rbind(1 - p_D[M_t == "ACT"] - p_ACTREM[M_t == "ACT"] - 
+                                     p_ACTREM_ps[M_t == "ACT"], p_ACTREM[M_t == "ACT"], 
+                                     p_ACTREM_ps[M_t == "ACT"], p_D[M_t == "ACT"])        
+  m_p_t[, M_t == "REM"]     <- rbind(p_REMACT[M_t == "REM"], 1 - p_REMACT[M_t == "REM"] - p_D[M_t == "REM"], 
+                                      0 , p_D[M_t == "REM"]) 
+    m_p_t[, M_t == "REM_ps"]  <- rbind(p_REM_psACT[M_t == "REM_ps"], 0,  
+                                     1 - p_REM_psACT[M_t == "REM_ps"] - p_D[M_t == "REM_ps"], p_D[M_t == "REM_ps"] )
+  m_p_t[, M_t == "D"]       <- rbind(0, 0, 0, 1)    
+  
+  return(t(m_p_t))
+  }) # End of with l_params_all
+}  
+
+```
+
+## 05.2 Cost function
+
+The `Costs` function estimates the costs at every cycle.
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+Costs <- function (l_params_all, M_t, df_X) {
+  # M_t: health state occupied by individual i at cycle t (character variable)
+  
+  with((l_params_all),{
+
+  c_Trt  <- inner_join(df_X, df_c_trt, by = "curTrt") # dataframe with costs for the current treatment for each patient
+  c_FMC  <- inner_join(df_X, df_FMC, by = "Age") # future medical costs derived from PAID 3.0
+  c_oy_m <- c_FMC$other_y_m/(52/cl_wk) # costs of other years adapted to cycle length
+  c_oy_f <- c_FMC$other_y_f/(52/cl_wk) # costs of other years adapt to cycle length
+  c_D_f  <- c_FMC$last_y_f # costs of year of death
+  c_D_m  <- c_FMC$last_y_m # costs of year of death
+  
+  c_t <- 0 # by default the cost for everyone is zero 
+  c_t[M_t == "ACT"]    <- c_ACT + c_Trt$Induction[M_t == "ACT"]*df_X$t_ind_c[M_t == "ACT"] + 
+                          c_Surg*df_X$sur_once[M_t == "ACT"] + c_Surg_o*df_X$sur_o[M_t == "ACT"] + 
+                          c_oy_m[M_t == "ACT"]*df_X$sex_m[M_t == "ACT"] + c_oy_f[M_t == "ACT"]*df_X$sex_f[M_t == "ACT"] + 
+                          c_prod_paid_ACT*df_X$work[M_t == "ACT"] + c_prod_days_caregiver + c_prod_days_unpaid
+  c_t[M_t == "REM"]    <- c_REM + c_Trt$Maintenance[M_t == "REM"]*df_X$t_mai_c[M_t == "REM"]  + 
+                          c_Surg*df_X$sur_once[M_t == "REM"] + c_Surg_o*df_X$sur_o[M_t == "REM"] + 
+                          c_oy_m[M_t == "REM"]*df_X$sex_m[M_t == "REM"] + c_oy_f[M_t == "REM"]*df_X$sex_f[M_t == "REM"] + 
+                          c_prod_paid_RESREM*df_X$work[M_t == "REM"]+ c_prod_days_caregiver + c_prod_days_unpaid
+    c_t[M_t == "REM_ps"] <- c_REM_ps + c_Surg*df_X$sur_once[M_t == "REM_ps"] +  
+                          c_oy_m[M_t == "REM_ps"]*df_X$sex_m[M_t == "REM_ps"] + c_oy_f[M_t == "REM_ps"]*df_X$sex_f[M_t == "REM_ps"] + 
+                          c_Surg_o*df_X$sur_o[M_t == "REM_ps"] + 
+                          c_prod_paid_RESREM*df_X$work[M_t == "REM_ps"]+ c_prod_days_caregiver + c_prod_days_unpaid
+  c_t[M_t == "D"]      <- c_FMC$last_y_f[M_t == "D"]*(df_X$death[M_t == "D"]*df_X$sex_f[M_t == "D"]) + 
+                          c_FMC$last_y_m[M_t == "D"]*(df_X$death[M_t == "D"]*df_X$sex_m[M_t == "D"])                                                         
+  # Stop costs of AZA in combination therapy after 1 year
+  c_t[df_X$curTrt == "IFX + AZA" & df_X$tot > 4] <- c_t -df_c_trt$Maintenance[df_c_trt$curTrt == "AZA"] 
+ 
+  return(c_t)        		                      # return the costs
+  
+  }) #End of with l_params_all
+  }
+```
+
+## 05.3 Health outcome function
+
+The `Effs` function to update the utilities at every cycle.
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+Effs <- function (l_params_all, M_t, df_X, cl = cl_wk/52) {
+  # M_t: health state occupied by individual i at cycle t (character variable)
+  # df_X: data frame with individual characteristics data 
+  # cl:   cycle length
+  # note that the utility of 'surgery other' is applied at the end of the microsim as it is conditional on events not health states
+  with((l_params_all),{
+  u_t                  <- 0 # by default the utility for everyone is zero
+  u_t[M_t == "ACT"]    <- df_u_coef[1]+                                      #intercept
+                          df_u_coef[2] *df_X$sex_f[M_t == "ACT"] +           #sex
+                          df_u_coef[5] *df_X$`age_diag_>40`[M_t == "ACT"] +  #age at diagnosis
+                          df_u_coef[6] *df_X$loc_L2[M_t == "ACT"]+           #disease location = L2
+                          df_u_coef[7] *df_X$loc_L3[M_t == "ACT"]+           #disease location = L3
+                          df_u_coef[8] *df_X$loc_L4[M_t == "ACT"]+           #disease location = L4
+                          df_u_coef[9] *df_X$fen_B2[M_t == "ACT"]+           #fenotype = B2
+                          df_u_coef[10]*df_X$fen_B3[M_t == "ACT"]+           #fenotype = B3
+                          df_u_coef[11]*df_X$peri_a_Y[M_t == "ACT"]+         #perianal disease = YES
+                          df_u_coef[12]*df_X$smoke_Y[M_t == "ACT"]+          #current smoker = yes
+                          df_u_coef[13]*df_X$Age[M_t == "ACT"]               #disutility for age
+
+                                         
+  u_t[M_t == "REM"]    <- df_u_coef[1] +                                    #intercept
+                          df_u_coef[2]*df_X$sex_f[M_t == "REM"]+            #sex
+                          df_u_coef[3]+                                     #remission
+                          df_u_coef[5]*df_X$`age_diag_>40`[M_t == "REM"]+   #age at diagnosis
+                          df_u_coef[6]*df_X$loc_L2[M_t == "REM"]+           #disease location = L2
+                          df_u_coef[7]*df_X$loc_L3[M_t == "REM"]+           #disease location = L3
+                          df_u_coef[8]*df_X$loc_L4[M_t == "REM"]+           #disease location = L4
+                          df_u_coef[9]*df_X$fen_B2[M_t == "REM"]+           #fenotype = B2
+                          df_u_coef[10]*df_X$fen_B3[M_t == "REM"]+          #fenotype = B3
+                          df_u_coef[11]*df_X$peri_a_Y[M_t == "REM"]+        #perianal disease = YES
+                          df_u_coef[12]*df_X$smoke_Y[M_t == "REM"]+         #current smoker = yes
+                          df_u_coef[13]*df_X$Age[M_t == "REM"]              #disutility for age
+  
+  u_t[M_t == "REM_ps"] <- df_u_coef[1]+                                        #intercept
+                          df_u_coef[2]*df_X$sex_f[M_t == "REM_ps"]+            #sex
+                          df_u_coef[3]+                                        #remission
+                          df_u_coef[5]*df_X$`age_diag_>40`[M_t == "REM_ps"]+   #age at diagnosis
+                          df_u_coef[6]*df_X$loc_L2[M_t == "REM_ps"]+           #disease location = L2
+                          df_u_coef[7]*df_X$loc_L3[M_t == "REM_ps"]+           #disease location = L3
+                          df_u_coef[8]*df_X$loc_L4[M_t == "REM_ps"]+           #disease location = L4
+                          df_u_coef[9]*df_X$fen_B2[M_t == "REM_ps"]+           #fenotype = B2
+                          df_u_coef[10]*df_X$fen_B3[M_t == "REM_ps"]+          #fenotype = B3
+                          df_u_coef[11]*df_X$peri_a_Y[M_t == "REM_ps"]+        #perianal disease = YES
+                          df_u_coef[12]*df_X$smoke_Y[M_t == "REM_ps"] +        #current smoker = yes
+                          df_u_coef[13]*df_X$Age[M_t == "REM_ps"]              #disutility for age 
+  
+  u_t[M_t == "D"]      <- u_D    # update the utility if dead
+  
+  QALYs <-  u_t * cl  # calculate the QALYs during cycle t
+  return(QALYs)       # return the QALYs
+  }) #End of with l_params_all
+}
+```
+
+# 06 Microsimulation
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+MicroSim <- function(l_params_all, n_i, df_X, TRT1 = TRT1, TRT2 = TRT2, TRT3 = TRT3, TRT4 = TRT4, TRT5 = TRT5, seed = 1) {
+
+  df_X <- f_create_df_X(l_params_all) # create the dataframe with patient characteristics
+  v_M_init <- f_v_M_init()            # create initial health states (active disease)
+
+  # Arguments:  
+  # n_i:     number of individuals
+  # df_X     data frame with individual characteristics data 
+  # TRT1/4:  The treatments in the sequence
+  # seed:    default is 1
+  
+  with((l_params_all), {
+  set.seed(seed) # set the seed
+  
+  n_states <- length(v_n) # the number of health states
+  
+  # create matrices with number of rows equal to the n_i, the number of columns equal to n_t  
+  # (the initial state and all the n_t cycles)
+  # m_M is used to store the health state information over time for every individual
+  # m_C is used to store the costs information over time for every individual
+  # m_E is used to store the effects information over time for every individual
+  # m_L is used to store the treatment line information over time for every individual
+  # m_Ind is used to store the time in induction period for every individual (only to check if model works, can be deleted in final model)
+  # m_S is used to store if a patient had surgery for active disease (i.e. ileocaecal surgery)
+  # m_S_o is used to store if a patient had other surgeries
+  # m_D is used for the calculation of future medical costs and is 1 in the cycle an individual dies
+
+  m_M <- m_C <- m_E <- m_L <- m_S <- m_S_o <- m_D <- matrix(nrow = n_i, ncol = n_t + 1, 
+                                                      dimnames = list(paste("ind"  , 1:n_i, sep = " "), 
+                                                      paste("cycle", 0:n_t, sep = " ")))  
+
+  df_X$curTrt <- as.character(rep(TRT1, n_i)) # all patients start with TRT1
+  m_M [, 1]   <- v_M_init                     # initial health state at cycle 0 for individual i
+  m_L [, 1]   <- rep(1, n_i)                  # initial line at cycle 0 for individual i
+  m_S[, 1]    <- rep(0,n_i)                   # matrix to capture if an individual had surgery due to active disease
+  m_S_o[, 1]  <- rep(0,n_i)                   # matrix to capture if an individual had other surgery
+  m_D[, 1]    <- df_X$death                   # matrix to capture the moment of death for individual i
+  
+  # Costs and QALYs in cycle 1 (to allow comparisons with outcome of DES-type model)
+  m_C[, 1]  <- Costs(l_params_all, m_M[, 1],  df_X)     
+  m_E[, 1]  <- Effs (l_params_all, m_M[, 1], df_X)
+  
+  # Open a loop for time running cycles 1 to n_t 
+  for (t in 1:n_t) {
+    set.seed(seed + t)
+    # Determine induction time in cycles based on current treatment
+    df_X$t_ind <-  1
+
+    # Determine if people are of working age
+    df_X$work <- ifelse(df_X$Age > 18 & df_X$Age < 67, 1, 0)
+    
+    # Extract the current probabilities of active disease from the time to event models
+    df_tp <- f_extract_prob(df_X, t)
+    
+    # Calculate the transition probabilities for the cycle based on health state t
+    m_P <- Probs(l_params_all, m_M[, t], df_X, t,  TRT1, TRT2, TRT3, TRT4, TRT5, df_tp)   
+    
+    # Sample the current health state based on the transition probabilities and store that state in matrix m_M 
+    m_M[, t + 1]  <- samplev(m_P, 1) 
+    
+    # Determine if a surgery 'other' event takes place (this does not influence the patient's health state)
+    df_X$sur_o <- rbinom(n_i, 1, df_tp$p_SUR_o)
+    m_S_o[, t + 1]  <- df_X$sur_o
+    
+    # Determine relative risk for discontinuation due to side effects from NMA
+    df_p_disc_temp_nai  <- inner_join(df_X, df_NMA_AE_nai, by = c("curTrt")) 
+    df_p_disc_temp_exp  <- inner_join(df_X, df_NMA_AE_exp, by = c("curTrt")) 
+    RR_disc_nai         <- df_p_disc_temp_nai$RR
+    RR_disc_exp         <- df_p_disc_temp_exp$RR
+    RR_disc             <- ifelse(df_X$Line == 1, RR_disc_nai, # First line always use naive values
+                           ifelse(df_X$Line == 2 & TRT1 == "AZA", RR_disc_nai,
+                           ifelse(df_X$Line == 2 & TRT1 == "MTX", RR_disc_nai, RR_disc_exp))) # lines 3, 4, 5 always 'exposed' 
+      
+    # Placebo background probability of discontinuation
+    p_disc_placebo   <- ifelse(df_X$Line == 1, p_disc_placebo_nai, # First line always use naive values
+                        ifelse(df_X$Line == 2 & TRT1 == "AZA", p_disc_placebo_nai,
+                        ifelse(df_X$Line == 2 & TRT1 == "MTX", p_disc_placebo_nai, p_disc_placebo_exp))) # lines 3, 4, 5 always 'exposed' 
+      
+    # Drawing from a binomial distribution given the input values to determine whether discontinuation occurs for a given patient
+    # Multiply the individual specific background probability with the individual specific treatment relative risk
+    df_X$disc <-  rbinom(n_i, 1, p_disc_placebo*RR_disc) 
+                   
+    # Variable to account for costs of surgery due to active disease only in the first cycle in REM_ps
+    df_X$sur_once <- ifelse(m_M[, t + 1] == "REM_ps" & m_M[, t ] != "REM_ps", 1, 0)
+    m_S[, t + 1]  <- df_X$sur_once
+      
+    # Determine if the patient should switch line:
+    # If a patient is still in active disease when induction therapy completed, then switch to next line
+    # If a patients has active disease and did not have 5 induction treatments, then switch to next line
+    # If a patient has had 5 treatment lines and gets active disease, then off treatment (= 555)
+    # If a patient is dead, the value of treatment line becomes 999
+    # If a patient discontinues treatment due to all cause discontinuation rates, then switch to next line
+      
+    df_X$Line <- ifelse(m_M[, t + 1] =="D", 999,
+                 ifelse(m_M[, t + 1] == "REM_ps", df_X$Line,                              # post surgery is not a treatment line
+                 ifelse(m_M[, t + 1] == "ACT" & m_M[, t] != "D" & df_X$Line == 5, 555,    #  switch to no treatment if all lines exhausted
+                 ifelse(m_M[, t + 1] == "ACT" & df_X$ind >= df_X$t_ind & df_X$Line < 5, df_X$Line + 1,    #switch due to induction not working
+                 ifelse(m_M[, t + 1] == "ACT" & m_M[ , t] == "REM" & df_X$Line < 5, df_X$Line + 1,        #switch due to losing effectiveness
+                 ifelse(m_M[, t + 1] == "ACT" & m_M[ , t] == "REM_ps" & df_X$Line < 5, df_X$Line + 1, 
+                 ifelse(m_M[, t + 1] == "REM" & df_X$disc == 1 & df_X$Line < 5, df_X$Line + 1,  df_X$Line))))))) #discontinuation switch
+
+    # Update matrix with current line number
+    m_L[ , t + 1] <- df_X$Line
+
+    # Update time in induction period
+    df_X$ind  <- ifelse(m_M[ , t + 1] == "ACT" & m_L[ , t + 1] == m_L[ , t], df_X$ind + 1, # increase induction time if active disease while on same line 
+                 ifelse(m_M[ , t + 1] == "REM", 0, 
+                 ifelse(m_M[ , t + 1] == "REM_ps", 0,1))) # reset induction time to zero if in remission
+      
+    # Induction and maintenance costs only for those on treatment
+    df_X$t_ind_c <- ifelse(m_M[ , t +1] == "ACT" & df_X$Line <= 5 & df_X$sur_once ==0 & df_X$sur_o ==0 , 1, 0) 
+    df_X$t_mai_c <- ifelse(m_M[ , t +1] == "REM" & df_X$Line <= 5, 1, 0)
+    
+     # Update the age of individuals that are alive
+    df_X$Age_cl[m_M[, t + 1] != "D"]  <- df_X$Age_cl[m_M[, t + 1] != "D"] + (cl_wk/52)
+    df_X$Age[m_M[, t + 1] != "D"]     <- round(df_X$Age_cl[m_M[, t + 1] != "D"]) # rounded age used for background mortality rate
+
+    # Update death status in m_D and in df_X to capture the costs of last year of life in the Costs function
+    m_D[, t + 1] <- ifelse(m_M[, t + 1] == "D" , 1, 0)
+    df_X$death <- ifelse(m_D[, t] == 0 & m_D[, t + 1] == 1, 1, 0) # i.e. only 1 if not dead in previous cycle to account for costs of last year of life
+      
+    # Update current treatment for the next cycle
+    df_X$curTrt <- ifelse(df_X$Line == 1, TRT1,
+                   ifelse(df_X$Line == 2, TRT2, 
+                   ifelse(df_X$Line == 3, TRT3, 
+                   ifelse(df_X$Line == 4, TRT4,
+                   ifelse(df_X$Line == 5, TRT5,
+                   ifelse(df_X$Line == 444, "surgery",        
+                   ifelse(df_X$Line == 555, "no-treatment",
+                   ifelse(df_X$Line == 999, "D", df_X$curTrt))))))))
+      
+    # Calculate costs per individual during cycle t + 1
+    m_C[, t + 1]  <- Costs(l_params_all, m_M[, t + 1], df_X)         
+    
+    # Calculate QALYs per individual during cycle t + 1
+    m_E[, t + 1]  <- Effs(l_params_all, m_M[, t + 1], df_X)  
+    
+    # Update time on treatment (used in f_extract_prob)
+    df_X$time <- ifelse( m_L[ , t] !=  m_L[ , t + 1], 1, df_X$time + 1) # If previous line was a different treatment, restart at 1
+    
+    # Display simulation progress
+    if(t/(n_t/10) == round(t/(n_t/10), 0)) { # display progress every 10%
+      cat('\r', paste(t/n_t * 100, "% done", sep = " "))
+      }
+      
+    } # close the loop for the time points 
+
+  # Apply disutility for surgery: for each 12-weekly surgery period, the utility value equals the intercept of the regression model. This because in a TTO study in the UK, the utility score for bowel surgery was nearly     identical (.69 vs .7) to the one for active disease (Worbes-Cerezo, M., Nafees, B., Lloyd, A., Gallop, K., Ladha, I. and Kerr, C., 2019. Disutility study for adult patients with moderate to severe Crohn’s disease.     Journal of Health Economics and Outcomes Research, 6(2), p.47.)
+  m_E[m_S_o == 1 & m_E != 0] <- df_u_coef[1]*(12/52)
+  m_E[m_S == 1 & m_E != 0] <- df_u_coef[1]*(12/52)
+  
+  # Calculate lifetime costs and effects 
+  tc     <- m_C %*% v_dwc    # total (discounted) cost per individual
+  te     <- m_E %*% v_dwe    # total (discounted) QALYs per individual 
+  tc_hat <- mean(tc)         # average (discounted) cost 
+  te_hat <- mean(te)         # average (discounted) QALYs
+  
+   # Store the results from the simulation in a list
+  if(PSA == F){
+  
+  # Restructure the m_L matrix to reflect that a surgery event does not equate a time spent in a treatment line
+  m_L[m_M == "REM_ps"] <- 444
+  
+  # Determine time on treatment in each line
+  m_ToT             <- m_L 
+  m_ToT[m_M == "D"] <- NA # if you are dead, remove treatment line
+  m_ToT             <- m_ToT[,-1] # remove cycle 0
+  
+  # Determine proportion on treatment line
+  df_PoT <- data.frame(p_L1 = rep(0, n_i),
+                       p_L2 = rep(0, n_i),
+                       p_L3 = rep(0, n_i),
+                       p_L4 = rep(0, n_i),
+                       p_L5 = rep(0, n_i),
+                       p_S  = rep(0, n_i), 
+                       p_noTrt = rep(0, n_i))
+  
+  df_PoT[ , 1] <- as.numeric(ifelse(rowSums(m_ToT=="1", na.rm = T)==0, NA, rowSums(m_ToT=="1", na.rm = T)))  
+  df_PoT[ , 2] <- as.numeric(ifelse(rowSums(m_ToT=="2", na.rm = T)==0, NA, rowSums(m_ToT=="2", na.rm = T)))
+  df_PoT[ , 3] <- as.numeric(ifelse(rowSums(m_ToT=="3", na.rm = T)==0, NA, rowSums(m_ToT=="3", na.rm = T)))
+  df_PoT[ , 4] <- as.numeric(ifelse(rowSums(m_ToT=="4", na.rm = T)==0, NA, rowSums(m_ToT=="4", na.rm = T)))
+  df_PoT[ , 5] <- as.numeric(ifelse(rowSums(m_ToT=="5", na.rm = T)==0, NA, rowSums(m_ToT=="5", na.rm = T)))
+  df_PoT[ , 6] <- as.numeric(ifelse(rowSums(m_ToT=="444", na.rm = T)==0, NA, rowSums(m_ToT=="444", na.rm = T)))
+  df_PoT[ , 7] <- as.numeric(ifelse(rowSums(m_ToT=="555", na.rm = T)==0, NA, rowSums(m_ToT=="555", na.rm = T)))
+  
+  df_PoMT <- df_PoT-1  # -1 to remove induction period -> we only count those who are at least two cycles on a drug, i.e. have entered maintenance
+  
+  # Remove zeros for patients who do not have response or remission after induction
+  df_PoMT[df_PoMT == 0] <- NA
+
+  t_L1    <- mean(df_PoMT[, 1], na.rm = T)*cl_wk/52 #mean time on maintenance
+  t_L2    <- mean(df_PoMT[, 2], na.rm = T)*cl_wk/52
+  t_L3    <- mean(df_PoMT[, 3], na.rm = T)*cl_wk/52
+  t_L4    <- mean(df_PoMT[, 4], na.rm = T)*cl_wk/52
+  t_L5    <- mean(df_PoMT[, 5], na.rm = T)*cl_wk/52
+  t_S     <- mean(df_PoMT[, 6], na.rm = T)*cl_wk/52
+  t_noTrt <- mean(df_PoMT[, 7], na.rm = T)*cl_wk/52
+  
+  #proportion receiving an induction treatment
+  p_L1    <- 100 #everybody starts on line 1
+  p_L2    <- (sum(!is.na(df_PoT[, 2]))/n_i)*100
+  p_L3    <- (sum(!is.na(df_PoT[, 3]))/n_i)*100
+  p_L4    <- (sum(!is.na(df_PoT[, 4]))/n_i)*100
+  p_L5    <- (sum(!is.na(df_PoT[, 5]))/n_i)*100
+  p_S     <- (sum(!is.na(df_PoT[, 6]))/n_i)*100
+  p_noTrt <- (sum(!is.na(df_PoT[, 7]))/n_i)*100
+  
+  #proportion of those on line x going to maintenance on that line
+  p_mai_L1    <- (sum(!is.na(df_PoMT[, 1]))/n_i)*100
+  p_mai_L2    <- (sum(!is.na(df_PoMT[, 2]))/((p_L2/100)*n_i))*100
+  p_mai_L3    <- (sum(!is.na(df_PoMT[, 3]))/((p_L3/100)*n_i))*100
+  p_mai_L4    <- (sum(!is.na(df_PoMT[, 4]))/((p_L4/100)*n_i))*100
+  p_mai_L5    <- (sum(!is.na(df_PoMT[, 5]))/((p_L5/100)*n_i))*100
+  
+  #time in remission (in years)
+  t_REM <- mean(as.numeric(ifelse(rowSums(m_M=="REM", na.rm = T)==0, NA, rowSums(m_M=="REM", na.rm = T)))*cl_wk/52, na.rm=T)
+
+      results <- list(m_M = m_M, m_C = m_C, m_L = m_L, m_ToT = m_ToT, m_S = m_S, m_S_o = m_S_o, m_E = m_E,
+                      tc = tc, te = te, tc_hat = tc_hat, te_hat = te_hat, 
+                      p_L1 = p_L1, p_L2 = p_L2, p_L3 = p_L3, p_L4 = p_L4, p_L5 = p_L5, p_S = p_S, p_noTrt = p_noTrt, 
+                      p_mai_L1 = p_mai_L1, p_mai_L2 = p_mai_L2, p_mai_L3 = p_mai_L3, p_mai_L4 = p_mai_L4, p_mai_L5 = p_mai_L5, 
+                      t_L1= t_L1, t_L2 = t_L2, t_L3 = t_L3, t_L4 = t_L4,  t_L5 = t_L5, t_S = t_S, t_noTrt = t_noTrt, t_REM = t_REM)   
+  }
+  
+  if(PSA == T){
+    results <- list(m_M = m_M, m_C = m_C, tc = tc , te = te, tc_hat = tc_hat, te_hat = te_hat)
+  }
+
+  return(results)  # return the results
+  }) # end of with(l_params_all)
+} # end of the MicroSim function  
+```
+
+# 07 Run the MicroSim 
+# 07.1 Single sequence
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+# By specifying all the arguments in the MicroSim() function the simulation can be started
+
+# Run the simulation for both no treatment and treatment options
+#Note, do not compare step-up (immunomodulator in line 1) with top-down (anti-tnf in line 1) treatments, only compare within set
+
+#l_params_all$df_c_trt[l_params_all$df_c_trt$curTrt == "UST", 2:3] <- l_params_all$df_c_trt[l_params_all$df_c_trt$curTrt == "UST", 2:3]*(1-0.6)
+
+
+tic()
+PSA <- F #if TRUE decreases number of stored parameters ± 8 seconds faster.
+outcomes_new <- MicroSim(l_params_all, n_i, df_X, TRT1 = "IFX+AZA", TRT2 = "UST", TRT3 = "UPA", TRT4 = "VED", TRT5 = "RIS" , seed = 1)
+toc()
+
+outcomes_old <- MicroSim(l_params_all, n_i, df_X, TRT1 = "AZA", TRT2 = "IFX+AZA",  TRT3 = "UPA",  TRT4 = "VED", TRT5 = "RIS", seed = 1)
+
+#proportion in remission
+prop_rem_new <- matrix(nrow = 100000,ncol = 6)
+prop_rem_old <- matrix(nrow = 100000,ncol = 6)
+for(i in 1:6){
+prop_rem_new[,i] <- ifelse(outcomes_new$m_M[,i] == "REM", 1, 0)
+prop_rem_old[,i] <- ifelse(outcomes_old$m_M[,i] == "REM", 1, 0)
+}
+colSums(prop_rem_new)
+colSums(prop_rem_old)
+
+# Store the mean costs of each strategy in a new variable C (vector of costs)
+v_C <- c(outcomes_new$tc_hat, outcomes_old$tc_hat)
+# Store the mean QALYs of each strategy in a new variable E (vector of effects)
+v_E <- c(outcomes_new$te_hat, outcomes_old$te_hat)
+
+# Use dampack to calculate the ICER
+calculate_icers(cost       = v_C,
+                effect     = v_E,
+                strategies = c("new", "old"))
+
+outcomes <- outcomes_old
+
+# Plot health state and line membership over time
+plot_markov(outcomes$m_M)
+plot_trace_line(outcomes$m_L) # line membership
+
+# Print time and proportion in line 1, 2, 3, 4, 5
+df_lines <- data.frame(line = c("Line 1", "Line 2", "Line 3", "Line 4", "Line 5", "surgery", "no_trt"),
+                       proportion = c(outcomes$p_L1, outcomes$p_L2, outcomes$p_L3, outcomes$p_L4, outcomes$p_L5, outcomes$p_S, outcomes$p_noTrt),
+                       time_on_mai = c(outcomes$t_L1, outcomes$t_L2, outcomes$t_L3, outcomes$t_L4, outcomes$t_L5, outcomes$t_S, outcomes$t_noTrt), # in years
+                       proportion_mai = c(outcomes$p_mai_L1, outcomes$p_mai_L2, outcomes$p_mai_L3, outcomes$p_mai_L4, outcomes$p_mai_L5, NA, NA),
+                       time_in_REM = c(outcomes$t_REM,NA,NA,NA,NA,NA,NA))
+df_lines
+
+# View outcomes
+# View(outcomes_less$m_M)
+# View(outcomes_less$m_C)
+# View(outcomes_less$m_L)
+
+#debug(MicroSim)
+#undebug(MicroSim)
+
+```
+
+# 0.7.2 Multiple sequences
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+## Set WTP
+wtp <- 20000
+
+## Run the analysis for all DMT sequences
+tic()
+# Use multiple cores
+cores <- detectCores()        # define number of cores available
+cl    <- makeCluster(cores-1) # assign cores -2 to be able to work
+registerDoSNOW(cl)            # open up multi-thread command
+
+clusterExport(cl, c('MicroSim', 'f_create_df_X', 'f_v_M_init', 'n_i', 'rtruncnorm', 'v_n', 'n_t',  'Costs', 'Effs', 'Probs', 
+                    'cl_wk', 't_ind_IFX5','t_ind_IFX10', 't_ind_IFX_AZA', 't_ind_ADA40','t_ind_ADA80','t_ind_ADA_AZA','t_ind_VED','t_ind_UST','t_ind_UPA',
+                    't_ind_AZA','t_ind_RIS','t_ind_MTX', 'f_extract_prob', 'df_tp_FL1_AZA', 'df_tp_FL2_IFX','df_tp_FL2_UST','df_tp_sur_other',
+                    'df_tp_sur_active', 'n_states', 'df_mort', "p_disc_placebo_nai", "p_disc_placebo_exp", 'v_dwc', 'v_dwe'))
+
+# Display simulation progress
+iterations <- nrow(df_trtseq)
+pb         <- txtProgressBar(max = iterations, style = 3)
+progress   <- function(n) setTxtProgressBar(pb, n)
+opts       <- list(progress = progress)
+
+# Run the simulation
+PSA     <- F
+results <- foreach(g = 1:nrow(df_trtseq), .options.snow = opts,
+                   .packages = c("dplyr", "darthtools")) %dopar% { # dplyr voor if_else, darthtools voor sample v
+                                   MicroSim(l_params_all, n_i, df_X, TRT1 = df_trtseq[g,1], TRT2 = df_trtseq[g,2], 
+                                            TRT3 = df_trtseq[g,3], TRT4 = df_trtseq[g,4], TRT5 = df_trtseq[g,5], seed = 1)
+                     }
+
+stopCluster(cl)
+stopImplicitCluster()
+
+toc()
+
+# Store the mean costs, QALYs, and clinical outcomes of each strategy in new variables
+v_C <- v_E <- p_L1 <- p_L2 <- p_L3 <- p_L4 <- p_L5 <-   p_mai_L1 <- p_mai_L2 <- p_mai_L3 <- p_mai_L4 <- p_mai_L5 <-p_noTrt <-
+  t_L1 <- t_L2 <- t_L3 <- t_L4 <- t_L5 <- t_noTrt <- t_REM  <- NULL
+
+for (i in 1:length(results)){
+  v_C[i]               <- results[[i]]$tc_hat
+  v_E[i]               <- results[[i]]$te_hat
+  t_L1[i]              <- results[[i]]$t_L1   
+  t_L2[i]              <- results[[i]]$t_L2   
+  t_L3[i]              <- results[[i]]$t_L3   
+  t_L4[i]              <- results[[i]]$t_L4
+  t_L5[i]              <- results[[i]]$t_L5
+  t_noTrt[i]           <- results[[i]]$t_noTrt
+  p_L1[i]              <- results[[i]]$p_L1   
+  p_L2[i]              <- results[[i]]$p_L2   
+  p_L3[i]              <- results[[i]]$p_L3   
+  p_L4[i]              <- results[[i]]$p_L4
+  p_L5[i]              <- results[[i]]$p_L5
+  p_mai_L1[i]              <- results[[i]]$p_mai_L1   
+  p_mai_L2[i]              <- results[[i]]$p_mai_L2   
+  p_mai_L3[i]              <- results[[i]]$p_mai_L3   
+  p_mai_L4[i]              <- results[[i]]$p_mai_L4
+  p_mai_L5[i]              <- results[[i]]$p_mai_L5
+  p_noTrt[i]           <- results[[i]]$p_noTrt
+  t_REM[i]             <- results[[i]]$t_REM
+    }
+
+# Combine the results in a data frame (without calculate_icers)
+results_ce <- data.frame(Treatment_sequence = v_names_str,
+                         Cost               = v_C,
+                         QALYs              = v_E,
+                         NHB                = v_E-(v_C/wtp),
+                         Time_in_line1      = t_L1,
+                         Time_in_line2      = t_L2,
+                         Time_in_line3      = t_L3,
+                         Time_in_line4      = t_L4,
+                         Time_in_line5      = t_L5,
+                         Time_discontinued  = t_noTrt,
+                         Prop_in_line1      = p_L1,
+                         Prop_in_line2      = p_L2, 
+                         Prop_in_line3      = p_L3, 
+                         Prop_in_line4      = p_L4,
+                         Prop_in_line5      = p_L5,
+                         Prop_mai_in_line1      = p_mai_L1,
+                         Prop_mai_in_line2      = p_mai_L2, 
+                         Prop_mai_in_line3      = p_mai_L3, 
+                         Prop_mai_in_line4      = p_mai_L4,
+                         Prop_mai_in_line5      = p_mai_L5,
+                         Prop_discontinued  =  p_noTrt,
+                         Time_in_remission = t_REM)
+
+results_ce <- cbind(results_ce[, 1], separate(results_ce, col = "Treatment_sequence", c("L1","L2","L3","L4", "L5"), "-"))
+colnames(results_ce)[colnames(results_ce) == 'results_ce[, 1]'] <- 'Treatment_sequence'
+
+results_step_up <- results_ce[results_ce$L1 == "AZA" | results_ce$L1 == "MTX",]
+results_top_down <- results_ce[results_ce$L1 != "AZA" & results_ce$L1 != "MTX",]
+
+# Fully incremental on results
+# Use dampack to calculate the ICERs and perform the fully incremental analysis
+icers_step_up         <-    calculate_icers(cost       = results_step_up$Cost,
+                                            effect     = results_step_up$QALYs,
+                                            strategies = results_step_up$Treatment_sequence)
+
+icers_top_down         <-   calculate_icers(cost       = results_top_down$Cost,
+                                            effect     = results_top_down$QALYs,
+                                            strategies = results_top_down$Treatment_sequence)
+
+## Save results
+write.csv(results_ce, here::here("Output", "Crohn_bc_n_i_30000.csv"))
+#write.csv(results_ce, here::here("Output", "Crohn_bc_no_sur.csv"))
+
+## Visualize results 
+
+## Step up
+make_rank_plot(data = results_step_up, 
+               rank = -results_step_up$`NHB`,
+               outcome = "NHB",
+               savename = "step up", 
+               plottitle = "Drug treatment ranking (NHB)",
+               scenario = "Step up sequences",
+               top = round(nrow(results_step_up)*0.2))  
+#note, the figure represents: proportion of n_i that goes on induction and proportion of those on induction who go to maintenance
+
+
+## Top down
+make_rank_plot(data = results_top_down, 
+               rank = -results_top_down$`NHB`,
+               outcome = "NHB",
+               savename = "top down", 
+               plottitle = "Drug treatment ranking (NHB)",
+               scenario = "Top down sequences",
+               top = round(nrow(results_top_down)*0.2))
+
+
+# Split results for step-up and top-down
+results_ce <- read.csv(here::here("Output", "Crohn_bc_n_i_30000.csv"), sep = ",", stringsAsFactors = F)
+results_ce <- results_ce[,-1]
+results_step_up <- results_ce[results_ce$L1 == "AZA" | results_ce$L1 == "MTX",]
+results_top_down <- results_ce[results_ce$L1 != "AZA" & results_ce$L1 != "MTX",]
+
+#for tables
+results_step_up <- results_step_up[,c(1,7,8,9)]
+results_top_down <- results_top_down[,c(1,7,8,9)]
+
+```
+
+# 0.8 OWSA
+# 0.8.1 Define input parameters
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+ ## Define sequence for which you want to run the NMA (don't choose the treatments that are the reference for the survival function, i.e. AZA, IFX5 UST)
+ ## Note only step-up sequences so no biologic in line one
+#Step-up
+TRT1a <- "AZA"
+TRT2a <- "IFX+AZA"
+TRT3a <- "UPA"
+TRT4a <- "VED"
+TRT5a <- "RIS"
+
+#top down
+#TRT1a <- "IFX+AZA"
+#TRT2a <- "UPA"
+#TRT3a <- "VED"
+#TRT4a <- "UST"
+#TRT5a <- "RIS"
+
+ ## Store all parameters you want to vary in a list
+l_params_all <- list(
+        #Placebo probability to achieve remission or response inputs
+        p_ACTREM_nai          = p_ACTREM_nai         ,
+        p_ACTREM_exp          = p_ACTREM_exp         ,
+        #Excess mortality inputs
+        HR_EM_CD_F            = HR_EM_CD_F           ,
+        HR_EM_CD_M            = HR_EM_CD_M           ,
+        #Cost inputs
+        c_ACT                 = c_ACT                ,
+        c_REM                 = c_REM                ,
+        c_REM_ps              = c_REM_ps             ,
+        c_Surg                = c_Surg               ,
+        c_Surg_o              = c_Surg_o             ,
+        c_prod_days_unpaid    = c_prod_days_unpaid   ,
+        c_prod_days_caregiver = c_prod_days_caregiver,
+        c_prod_paid_ACT       = c_prod_paid_ACT      ,
+        c_prod_paid_RESREM    = c_prod_paid_RESREM   ,
+        #Utility inputs
+        u_D                   = u_D                  ,
+        #NMA inputs
+        df_NMA_ind_REM_nai_L1    = df_NMA_ind_REM_nai_L1    ,
+        df_NMA_ind_REM_nai_L2    = df_NMA_ind_REM_nai_L2    ,
+        df_NMA_ind_REM_exp_L2    = df_NMA_ind_REM_exp_L2    ,
+        df_NMA_ind_REM_exp_L3    = df_NMA_ind_REM_exp_L3    ,
+        df_NMA_ind_REM_exp_L4    = df_NMA_ind_REM_exp_L4    ,
+        df_NMA_ind_REM_exp_L5    = df_NMA_ind_REM_exp_L5    ,
+        df_NMA_mai_REMRES_nai_L1 = df_NMA_mai_REMRES_nai_L1 ,
+        df_NMA_mai_REMRES_nai_L2 = df_NMA_mai_REMRES_nai_L2 ,
+        df_NMA_mai_REMRES_exp_L2 = df_NMA_mai_REMRES_exp_L2 ,
+        df_NMA_mai_REMRES_exp_L3 = df_NMA_mai_REMRES_exp_L3 ,
+        df_NMA_mai_REMRES_exp_L4 = df_NMA_mai_REMRES_exp_L4 ,
+        df_NMA_mai_REMRES_exp_L5 = df_NMA_mai_REMRES_exp_L5 ,
+        df_NMA_AE_nai         = df_NMA_AE_nai        ,
+        df_NMA_AE_exp         = df_NMA_AE_exp        ,
+        #other data frames that cannot be varied separately 
+        df_c_trt              = df_c_trt             ,   #data frame for costs
+        df_FMC                = df_FMC               ,   #data frame future medical costs
+        df_u_coef             = utility_OLS$coefficients,#date frame utility regression model
+        cl_wk                 = cl_wk)
+
+
+# Make a vector with names that you wish to appear in the tornado plot that are easier to understand for readers
+v_names_params <- c( "Probability from ACT to REM naive patients"            ,#"p_ACTREM_nai"            
+                     "Probability from ACT to REM exposed patients"            ,#"p_ACTREM_exp"            
+                     "HR excess mortality Female"              ,#"HR_EM_CD_F"              
+                     "HR excess mortality Male"              ,#"HR_EM_CD_M"              
+                     "Costs active disease"                   ,#"c_ACT"                   
+                     "Costs remission"                   ,#"c_REM"                   
+                     "Costs remission post surgery"                ,#"c_REM_ps"                
+                     "Costs surgery due to active disease"                  ,#"c_Surg"                  
+                     "Cost surgery other"                ,#"c_Surg_o"                
+                     "Costs unpaid work"      ,#"c_prod_days_unpaid"      
+                     "Costs paid work caregiver"   ,#"c_prod_days_caregiver"   
+                     "Costs productivity loss active disease"         ,#"c_prod_paid_ACT"         
+                     "Costs productivity loss remission"      ,#"c_prod_paid_RESREM"      
+                     "Utility of death"                     ,#"u_D"                     
+                     "RR induction of remission L1 naive patients"   ,#"df_NMA_ind_REM_nai_L1"    
+                     "RR induction of remission L2 naive patients"   ,#"df_NMA_ind_REM_nai_L2"    
+                     "RR induction of remission L2 exposed patients"   ,#"df_NMA_ind_REM_exp_L2"    
+                     "RR induction of remission L3 exposed patients"   ,#"df_NMA_ind_REM_exp_L3"    
+                     "RR induction of remission L4 exposed patients"   ,#"df_NMA_ind_REM_exp_L4"    
+                     "RR induction of remission L5 exposed patients"   ,#"df_NMA_ind_REM_exp_L5"    
+                     "RR maintenance of remission L1 naive patients",#"df_NMA_mai_REMRES_nai_L1"
+                     "RR maintenance of remission L2 naive patients",#"df_NMA_mai_REMRES_nai_L2"
+                     "RR maintenance of remission L2 exposed patients",#"df_NMA_mai_REMRES_exp_L2"
+                     "RR maintenance of remission L3 exposed patients",#"df_NMA_mai_REMRES_exp_L3"
+                     "RR maintenance of remission L4 exposed patients",#"df_NMA_mai_REMRES_exp_L4"
+                     "RR maintenance of remission L5 exposed patients",#"df_NMA_mai_REMRES_exp_L5"
+                     "RR AE related discontinuation naive patients"           ,#"df_NMA_AE_nai"           
+                     "RR AE related discontinuation exposed patients"           ,#"df_NMA_AE_exp"           
+                     "Costs drug acquisition"                ,#"df_c_trt"                
+                     "Costs in life years gained"                  ,#"df_FMC"                  
+                     "Health related quality of life (utility)"              ,#"df_u_coeff"              
+                     "cycle length") #cl_wk
+
+# Proportion with which you vary the base case settings
+lower <- 0.8
+upper <- 1.2
+
+# Determine lower values
+params_owsa_min <- lapply(l_params_all[1:(length(v_names_params)-18)], "*", lower) #note: we take out the last 12 dataframes as these are dataframes and are added below separately
+
+# Determine upper values
+params_owsa_max <- lapply(l_params_all[1:(length(v_names_params)-18)], "*", upper) #note: we take out the last 12 dataframes as these are dataframes and are added below separately
+
+#Overwrite those for which a CI is available
+params_owsa_min$p_ACTREM_nai <- 0.1691 #lower end of 95%CI
+params_owsa_max$p_ACTREM_nai <- 0.2712 #upper end of 95% CI
+
+params_owsa_min$p_ACTREM_exp <- 0.1102 #lower end of 95%CI
+params_owsa_max$p_ACTREM_exp <- 0.2073 #upper end of 95% CI
+
+# Adjust the NMA estimates for the treatments of interest in the sequence
+# First add the unadjusted dataframes to the input list
+params_owsa_min$df_NMA_ind_REM_nai_L1   <- df_NMA_ind_REM_nai_L1  
+params_owsa_min$df_NMA_ind_REM_nai_L2   <- df_NMA_ind_REM_nai_L2  
+params_owsa_min$df_NMA_ind_REM_exp_L2   <- df_NMA_ind_REM_exp_L2
+params_owsa_min$df_NMA_ind_REM_exp_L3   <- df_NMA_ind_REM_exp_L3 
+params_owsa_min$df_NMA_ind_REM_exp_L4   <- df_NMA_ind_REM_exp_L4 
+params_owsa_min$df_NMA_ind_REM_exp_L5   <- df_NMA_ind_REM_exp_L5 
+
+params_owsa_min$df_NMA_mai_REMRES_nai_L1 <- df_NMA_mai_REMRES_nai_L1
+params_owsa_min$df_NMA_mai_REMRES_nai_L2 <- df_NMA_mai_REMRES_nai_L2
+params_owsa_min$df_NMA_mai_REMRES_exp_L2<- df_NMA_mai_REMRES_exp_L2
+params_owsa_min$df_NMA_mai_REMRES_exp_L3<- df_NMA_mai_REMRES_exp_L3
+params_owsa_min$df_NMA_mai_REMRES_exp_L4<- df_NMA_mai_REMRES_exp_L4
+params_owsa_min$df_NMA_mai_REMRES_exp_L5<- df_NMA_mai_REMRES_exp_L5
+params_owsa_min$df_NMA_AE_nai        <- df_NMA_AE_nai        
+params_owsa_min$df_NMA_AE_exp        <- df_NMA_AE_exp        
+
+params_owsa_max$df_NMA_ind_REM_nai_L1   <- df_NMA_ind_REM_nai_L1  
+params_owsa_max$df_NMA_ind_REM_nai_L2   <- df_NMA_ind_REM_nai_L2  
+params_owsa_max$df_NMA_ind_REM_exp_L2   <- df_NMA_ind_REM_exp_L2
+params_owsa_max$df_NMA_ind_REM_exp_L3   <- df_NMA_ind_REM_exp_L3 
+params_owsa_max$df_NMA_ind_REM_exp_L4   <- df_NMA_ind_REM_exp_L4 
+params_owsa_max$df_NMA_ind_REM_exp_L5   <- df_NMA_ind_REM_exp_L5 
+
+params_owsa_max$df_NMA_mai_REMRES_nai_L1 <- df_NMA_mai_REMRES_nai_L1
+params_owsa_max$df_NMA_mai_REMRES_nai_L2 <- df_NMA_mai_REMRES_nai_L2
+params_owsa_max$df_NMA_mai_REMRES_exp_L2<- df_NMA_mai_REMRES_exp_L2
+params_owsa_max$df_NMA_mai_REMRES_exp_L3<- df_NMA_mai_REMRES_exp_L3
+params_owsa_max$df_NMA_mai_REMRES_exp_L4<- df_NMA_mai_REMRES_exp_L4
+params_owsa_max$df_NMA_mai_REMRES_exp_L5<- df_NMA_mai_REMRES_exp_L5
+params_owsa_max$df_NMA_AE_nai        <- df_NMA_AE_nai        
+params_owsa_max$df_NMA_AE_exp        <- df_NMA_AE_exp       
+
+# Add the element you did not vary to min and max so the lists are of equal length
+params_owsa_min$df_c_trt             <- l_params_all$df_c_trt
+params_owsa_min$df_FMC               <- l_params_all$df_FMC
+params_owsa_min$df_u_coef            <- utility_OLS$coefficients
+params_owsa_min$cl_wk                <- cl_wk
+params_owsa_max$df_c_trt             <- l_params_all$df_c_trt
+params_owsa_max$df_FMC               <- l_params_all$df_FMC
+params_owsa_max$df_u_coef            <- utility_OLS$coefficients
+params_owsa_max$cl_wk                <- cl_wk
+
+
+# Adjust the relative risks of the interventions of the selected sequence*lower
+# NMA induction of remission for naive and exposed patients for all TRTs in sequence a and b
+
+# Min
+params_owsa_min$df_NMA_ind_REM_nai_L1$RR    <- l_params_all$df_NMA_ind_REM_nai_L1$RR - 1.96*l_params_all$df_NMA_ind_REM_nai_L1$seRR
+params_owsa_min$df_NMA_ind_REM_nai_L2$RR    <- l_params_all$df_NMA_ind_REM_nai_L2$RR - 1.96*l_params_all$df_NMA_ind_REM_nai_L2$seRR
+params_owsa_min$df_NMA_ind_REM_exp_L2$RR    <- l_params_all$df_NMA_ind_REM_exp_L2$RR - 1.96*l_params_all$df_NMA_ind_REM_exp_L2$seRR
+params_owsa_min$df_NMA_ind_REM_exp_L3$RR    <- l_params_all$df_NMA_ind_REM_exp_L3$RR - 1.96*l_params_all$df_NMA_ind_REM_exp_L3$seRR
+params_owsa_min$df_NMA_ind_REM_exp_L4$RR    <- l_params_all$df_NMA_ind_REM_exp_L4$RR - 1.96*l_params_all$df_NMA_ind_REM_exp_L4$seRR
+params_owsa_min$df_NMA_ind_REM_exp_L5$RR    <- l_params_all$df_NMA_ind_REM_exp_L5$RR - 1.96*l_params_all$df_NMA_ind_REM_exp_L5$seRR
+
+
+
+# Max
+params_owsa_max$df_NMA_ind_REM_nai_L1$RR    <- l_params_all$df_NMA_ind_REM_nai_L1$RR + 1.96*l_params_all$df_NMA_ind_REM_nai_L1$seRR
+params_owsa_max$df_NMA_ind_REM_nai_L2$RR    <- l_params_all$df_NMA_ind_REM_nai_L2$RR + 1.96*l_params_all$df_NMA_ind_REM_nai_L2$seRR
+params_owsa_max$df_NMA_ind_REM_exp_L2$RR    <- l_params_all$df_NMA_ind_REM_exp_L2$RR + 1.96*l_params_all$df_NMA_ind_REM_exp_L2$seRR
+params_owsa_max$df_NMA_ind_REM_exp_L3$RR    <- l_params_all$df_NMA_ind_REM_exp_L3$RR + 1.96*l_params_all$df_NMA_ind_REM_exp_L3$seRR
+params_owsa_max$df_NMA_ind_REM_exp_L4$RR    <- l_params_all$df_NMA_ind_REM_exp_L4$RR + 1.96*l_params_all$df_NMA_ind_REM_exp_L4$seRR
+params_owsa_max$df_NMA_ind_REM_exp_L5$RR    <- l_params_all$df_NMA_ind_REM_exp_L5$RR + 1.96*l_params_all$df_NMA_ind_REM_exp_L5$seRR
+
+
+# NMA maintenance of remission for naive and exposed patients for all TRTs in sequence a and b
+# Min
+# Note: for maintenance NMA higher RR = worse, so + 1.96*se
+params_owsa_min$df_NMA_mai_REMRES_nai_L1$RR    <- l_params_all$df_NMA_mai_REMRES_nai_L1$RR+ 1.96 * l_params_all$df_NMA_mai_REMRES_nai_L1$seRR
+params_owsa_min$df_NMA_mai_REMRES_nai_L2$RR    <- l_params_all$df_NMA_mai_REMRES_nai_L2$RR+ 1.96 * l_params_all$df_NMA_mai_REMRES_nai_L2$seRR
+params_owsa_min$df_NMA_mai_REMRES_exp_L2$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L2$RR+ 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L2$seRR
+params_owsa_min$df_NMA_mai_REMRES_exp_L3$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L3$RR+ 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L3$seRR
+params_owsa_min$df_NMA_mai_REMRES_exp_L4$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L4$RR+ 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L4$seRR
+params_owsa_min$df_NMA_mai_REMRES_exp_L5$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L5$RR+ 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L5$seRR
+
+# Max
+params_owsa_max$df_NMA_mai_REMRES_nai_L1$RR    <- l_params_all$df_NMA_mai_REMRES_nai_L1$RR- 1.96 * l_params_all$df_NMA_mai_REMRES_nai_L1$seRR
+params_owsa_max$df_NMA_mai_REMRES_nai_L2$RR    <- l_params_all$df_NMA_mai_REMRES_nai_L2$RR- 1.96 * l_params_all$df_NMA_mai_REMRES_nai_L2$seRR
+params_owsa_max$df_NMA_mai_REMRES_exp_L2$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L2$RR- 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L2$seRR
+params_owsa_max$df_NMA_mai_REMRES_exp_L3$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L3$RR- 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L3$seRR
+params_owsa_max$df_NMA_mai_REMRES_exp_L4$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L4$RR- 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L4$seRR
+params_owsa_max$df_NMA_mai_REMRES_exp_L5$RR    <- l_params_all$df_NMA_mai_REMRES_exp_L5$RR- 1.96 * l_params_all$df_NMA_mai_REMRES_exp_L5$seRR
+
+
+
+
+# For adverse events (lower), note we limit the RR at a lower end of 0.0001 to avoid negative values
+# Min
+params_owsa_min$df_NMA_AE_nai$RR  <- l_params_all$df_NMA_AE_nai$RR - 1.96*l_params_all$df_NMA_AE_nai$seRR
+params_owsa_min$df_NMA_AE_nai$RR <- ifelse( params_owsa_min$df_NMA_AE_nai$RR < 0, 0.0001, params_owsa_min$df_NMA_AE_nai$RR)
+params_owsa_min$df_NMA_AE_exp$RR  <- l_params_all$df_NMA_AE_exp$RR - 1.96*l_params_all$df_NMA_AE_exp$seRR
+params_owsa_min$df_NMA_AE_exp$RR <- ifelse( params_owsa_min$df_NMA_AE_exp$RR < 0, 0.0001, params_owsa_min$df_NMA_AE_exp$RR)
+
+# Max
+params_owsa_max$df_NMA_AE_nai$RR  <- l_params_all$df_NMA_AE_nai$RR + 1.96*l_params_all$df_NMA_AE_nai$seRR
+params_owsa_max$df_NMA_AE_nai$RR <- ifelse( params_owsa_max$df_NMA_AE_nai$RR < 0, 0.0001, params_owsa_max$df_NMA_AE_nai$RR)
+params_owsa_max$df_NMA_AE_exp$RR  <- l_params_all$df_NMA_AE_exp$RR + 1.96*l_params_all$df_NMA_AE_exp$seRR
+params_owsa_max$df_NMA_AE_exp$RR <- ifelse( params_owsa_max$df_NMA_AE_exp$RR < 0, 0.0001, params_owsa_max$df_NMA_AE_exp$RR)
+
+
+#####
+
+#Adjust the intercept of the utility regression model using confidence interval
+params_owsa_min$df_u_coef[1] <- params_owsa_min$df_u_coef[1]-(1.96*params_owsa_min$df_u_coef[1,2])
+params_owsa_max$df_u_coef[1] <- params_owsa_max$df_u_coef[1]+(1.96*params_owsa_max$df_u_coef[1,2])
+
+
+
+# Save base case values
+params_owsa_bc  <- l_params_all[1:length(v_names_params)]
+
+
+
+```
+
+## 08.2 Run the OWSA
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+# Run the base-case analysis
+
+PSA <- T #if FALSE increases number of stored parameters, is slower but gives additional insights in deterministic setting
+## Set WTP
+wtp <- 20000
+# NB. If you change the DMTs, make sure to change the MicroSim in the for loop of the OWSA as well
+base_case_result_a     <- MicroSim(l_params_all, n_i, df_X, TRT1 = TRT1a, TRT2 = TRT2a, TRT3 = TRT3a, TRT4 = TRT4a, TRT5 = TRT5a, seed = 1)
+base_case_result_a$NHB <-  base_case_result_a$te_hat - (base_case_result_a$tc_hat/wtp)
+
+#base_case_result_b     <- MicroSim(l_params_all, n_i, df_X, TRT1 = TRT1b, TRT2 = TRT2b, TRT3 = TRT3b, TRT4 = TRT4b, TRT5 = TRT5b, seed = 1)
+#base_case_result_b$NHB <-  base_case_result_b$te_hat - (base_case_result_b$tc_hat/wtp)
+
+#d_e <- base_case_result_a$te_hat-base_case_result_b$te_hat
+#d_c <- base_case_result_a$tc_hat-base_case_result_b$tc_hat
+#iNHB <- d_e - (d_c/wtp)
+
+
+# Prepare list object for lapply to use
+l_owsa <- list()
+l_owsa <- rep(list(l_params_all),(length(v_names_params)*2))
+
+for (i in 1:length(v_names_params)){
+  l_owsa[[i]][[i]]                        <- params_owsa_min[[i]]
+  l_owsa[[i+length(v_names_params)]][[i]] <- params_owsa_max[[i]]  
+}
+
+l_results_owsa <- list()
+l_owsa_test <- list()
+##
+#test
+#l_owsa_test <- list()
+#l_owsa_test[[1]] <- l_owsa[[1]]
+#l_owsa_test[[2]] <- l_owsa[[2]]
+#l_owsa_test[[3]] <- l_owsa[[3]]
+#l_owsa_test[[4]] <- l_owsa[[4]]
+#l_owsa_test[[5]] <- l_owsa[[5]]
+#l_owsa_test[[6]] <- l_owsa[[6]]
+#l_results_owsa <- lapply(l_owsa_test, function(o){MicroSim(o, n_i, df_X = df_X, TRT1 = TRT1, TRT2 = TRT2, TRT3 = TRT3, TRT4 = TRT4, seed = 1)})
+##
+
+# Define number of cores available (minus one to avoid overload)
+n_cores <- detectCores()-1 
+registerDoParallel(cores = n_cores)
+cl      <- makeCluster(n_cores)
+clusterExport(cl, c('MicroSim', 'f_create_df_X', 'f_v_M_init', 'n_i', 'rtruncnorm', 'v_n', 'n_t', 'age', 'sd_age', 'TRT1a','TRT2a','TRT3a','TRT4a', 'TRT5a', 'Costs', 'Effs', 'Probs', 
+                    'cl_wk', 't_ind_IFX5','t_ind_IFX10', 't_ind_IFX_AZA', 't_ind_ADA40','t_ind_ADA80','t_ind_ADA_AZA','t_ind_VED','t_ind_UST','t_ind_UPA',
+                    't_ind_AZA','t_ind_RIS','t_ind_MTX', 'f_extract_prob', 'df_tp_FL1_AZA', 'df_tp_FL2_nai','df_tp_FL2_exp','df_tp_FL2_UST',
+                    'df_tp_FL2_IFX','df_tp_OS', 'df_tp_sur_other', 'df_tp_sur_active', 'n_states', 'df_mort', "p_disc_placebo_nai", "p_disc_placebo_exp", 'v_dwc', 'v_dwe', 'baseline', 'PSA'))
+
+
+clusterEvalQ(cl, 
+             {library(dplyr) 
+               library(darthtools)
+               })
+
+# Run OWSA
+tic()
+l_results_owsa_a <- parLapply(cl, l_owsa,  function(o){
+                         MicroSim(o, n_i, df_X, TRT1 = TRT1a, TRT2 = TRT2a, TRT3 = TRT3a, TRT4 = TRT4a, TRT5 = TRT5a, seed = 1)}
+                         )
+
+#l_results_owsa_b <- parLapply(cl, l_owsa,  function(o){
+#                         MicroSim(o, n_i, df_X, TRT1 = TRT1b, TRT2 = TRT2b, TRT3 = TRT3b, TRT4 = TRT4b, TRT5 = TRT5b, seed = 1)} 
+#                         )
+toc()
+stopCluster(cl)
+
+# Save results
+l_results_min_a <- l_results_owsa_a[1:length(v_names_params)]
+l_results_max_a <- l_results_owsa_a[c(length(v_names_params)+1):c(length(v_names_params)+length(v_names_params))]
+
+#l_results_min_b <- l_results_owsa_b[1:length(v_names_params)]
+#l_results_max_b <- l_results_owsa_b[c(length(v_names_params)+1):c(length(v_names_params)+length(v_names_params))]
+
+#For treatment A
+results_owsa  <- data.frame(Parameter     = v_names_params, 
+                            Lower_Bound_c = rep(NA, length(v_names_params)), Lower_Bound_e = rep(NA, length(v_names_params)),  
+                            Upper_Bound_c = rep(NA, length(v_names_params)), Upper_Bound_e = rep(NA, length(v_names_params)))
+
+for(i in 1:length(v_names_params)){
+  results_owsa[i,2] <- l_results_min_a[[i]]$tc_hat#-l_results_min_b[[i]]$tc_hat#base_case_result_b$tc_hat#
+  results_owsa[i,3] <- l_results_min_a[[i]]$te_hat#-l_results_min_b[[i]]$te_hat#base_case_result_b$te_hat#
+  results_owsa[i,4] <- l_results_max_a[[i]]$tc_hat#-l_results_max_b[[i]]$tc_hat#base_case_result_b$tc_hat#
+  results_owsa[i,5] <- l_results_max_a[[i]]$te_hat#-l_results_max_b[[i]]$te_hat#base_case_result_b$te_hat#
+}
+
+# Calculate NHB
+results_owsa$Lower_Bound_NHB <-  (results_owsa$Lower_Bound_e - (results_owsa$Lower_Bound_c/wtp))
+results_owsa$Upper_Bound_NHB <-  (results_owsa$Upper_Bound_e - (results_owsa$Upper_Bound_c/wtp))
+
+# Calculate absolute difference between upper and lower value
+results_owsa$UL_Difference_c   <- abs(results_owsa$Upper_Bound_c-results_owsa$Lower_Bound_c)
+results_owsa$UL_Difference_e   <- abs(results_owsa$Upper_Bound_e-results_owsa$Lower_Bound_e)
+results_owsa$UL_Difference_NHB <- abs(results_owsa$Upper_Bound_NHB-results_owsa$Lower_Bound_NHB)
+
+results_owsa_a <- results_owsa
+
+##For treatment B
+#
+#results_owsa  <- data.frame(Parameter     = v_names_params, 
+#                            Lower_Bound_c = rep(NA, length(v_names_params)), Lower_Bound_e = rep(NA, length(v_names_params)),  
+#                            Upper_Bound_c = rep(NA, length(v_names_params)), Upper_Bound_e = rep(NA, length(v_names_params)))
+#
+#for(i in 1:length(v_names_params)){
+#  results_owsa[i,2] <- l_results_min_b[[i]]$tc_hat#base_case_result_b$tc_hat#
+#  results_owsa[i,3] <- l_results_min_b[[i]]$te_hat#base_case_result_b$te_hat#
+#  results_owsa[i,4] <- l_results_max_b[[i]]$tc_hat#base_case_result_b$tc_hat#
+#  results_owsa[i,5] <- l_results_max_b[[i]]$te_hat#base_case_result_b$te_hat#
+#}
+#
+#
+# 
+## Calculate NHB
+#results_owsa$Lower_Bound_NHB <-  (results_owsa$Lower_Bound_e - (results_owsa$Lower_Bound_c/wtp))
+#results_owsa$Upper_Bound_NHB <-  (results_owsa$Upper_Bound_e - (results_owsa$Upper_Bound_c/wtp))
+#
+## Calculate absolute difference between upper and lower value
+#results_owsa$UL_Difference_c   <- abs(results_owsa$Upper_Bound_c-results_owsa$Lower_Bound_c)
+#results_owsa$UL_Difference_e   <- abs(results_owsa$Upper_Bound_e-results_owsa$Lower_Bound_e)
+#results_owsa$UL_Difference_NHB <- abs(results_owsa$Upper_Bound_NHB-results_owsa$Lower_Bound_NHB)
+#
+#results_owsa_b <- results_owsa
+#
+#
+## Make results incremental
+#results_owsa_i <- results_owsa[, -c(6:10)]
+#results_owsa_i[,1] <- results_owsa[,1]
+#results_owsa_i[,2:5] <- results_owsa_a[,2:5]-results_owsa_b[,2:5]
+#results_owsa_i$Lower_Bound_iNHB <- results_owsa_i$Lower_Bound_e - (results_owsa_i$Lower_Bound_c/wtp)
+#results_owsa_i$Upper_Bound_iNHB <- results_owsa_i$Upper_Bound_e - (results_owsa_i$Upper_Bound_c/wtp)
+#
+#results_owsa_i$UL_Difference_c   <- abs(results_owsa_i$Upper_Bound_c-results_owsa_i$Lower_Bound_c)
+#results_owsa_i$UL_Difference_e   <- abs(results_owsa_i$Upper_Bound_e-results_owsa_i$Lower_Bound_e)
+#results_owsa_i$UL_Difference_NHB <- abs(results_owsa_i$Upper_Bound_iNHB-results_owsa_i$Lower_Bound_iNHB)
+
+
+# Separate in data frames per outcome
+results_owsa_c <- results_owsa[ , c(1,2,4,8)]
+colnames(results_owsa_c) <- c("Parameter", "Lower_Bound", "Upper_Bound", "UL_Difference")
+
+results_owsa_e <- results_owsa[ , c(1,3,5,9)]
+colnames(results_owsa_e) <- c("Parameter", "Lower_Bound", "Upper_Bound", "UL_Difference")
+
+results_owsa_NHB <- results_owsa[ , c(1,6,7,10)]
+colnames(results_owsa_NHB) <- c("Parameter", "Lower_Bound", "Upper_Bound", "UL_Difference")
+
+# Save results
+#write.csv(results_owsa, here::here("Output", "results_owsa.csv"))
+
+```
+
+## 08.3 Tornado diagrams
+### 08.3.1 Costs
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+results_owsa <- results_owsa_c
+results_owsa <- results_owsa[results_owsa$UL_Difference > 0.01, ]
+base_case    <- base_case_result_a 
+
+order.parameters <- results_owsa %>% arrange(UL_Difference) %>%
+  mutate(Parameter=factor(x=Parameter, levels=Parameter)) %>% 
+  dplyr::select(Parameter) %>% unlist() %>% levels() 
+
+# width of columns in plot (value between 0 and 1)
+width <- 0.90
+
+# get data frame in shape for ggplot and geom_rect
+results_owsa.2 <- results_owsa %>%
+  # gather columns Lower_Bound and Upper_Bound into a single column using gather
+  gather(key='type', value='output.value', Lower_Bound:Upper_Bound) %>%
+  # just reordering columns
+  dplyr::select(Parameter, type, output.value, UL_Difference) %>%
+  # create the columns for geom_rect
+  mutate(Parameter=factor(Parameter, levels=order.parameters),
+         ymin=pmin(output.value, base_case),
+         ymax=pmax(output.value, base_case),
+         xmin=as.numeric(Parameter)-width/2,
+         xmax=as.numeric(Parameter)+width/2)
+
+# create plot
+# (use scale_x_continuous to change labels in y axis to name of parameters)
+ggplot() + 
+  geom_rect(data = results_owsa.2, 
+            aes(ymax=ymax, ymin=ymin, xmax=xmax, xmin=xmin, fill=type)) +
+  ylab("Incremental costs") +
+  theme_bw() + 
+  theme(axis.title.y=element_blank(), legend.position = 'right',
+        legend.title = element_blank()) + 
+  geom_hline(yintercept = base_case) +
+  scale_x_continuous(breaks = c(1:length(order.parameters)), 
+                     labels = order.parameters) +
+  scale_y_continuous(labels = dollar_format(prefix = "€", big.mark=",", decimal.mark = ".")) +
+  scale_fill_manual(labels=c("Lower value", "Upper value"), values = c("#ffba01", "#6ca9e6")) +
+  theme(text=element_text(size=10), axis.text.y = element_text(size = 10), legend.position = "bottom")+
+  coord_flip()
+
+#ggsave(here::here("output", "tornado_diagram_costs_AZA-IFX5-RIS-UPA.png"), width = 16, height = 16, units = c("cm"), dpi = 300)
+```
+
+### 08.3.2 Effects
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+results_owsa <- results_owsa_e 
+results_owsa <- results_owsa[results_owsa$UL_Difference > 0.00001, ]
+base_case    <- base_case_result_a$te_hat
+
+order.parameters <- results_owsa %>% arrange(UL_Difference) %>%
+  mutate(Parameter=factor(x=Parameter, levels=Parameter)) %>% 
+  dplyr::select(Parameter) %>% unlist() %>% levels() 
+
+# width of columns in plot (value between 0 and 1)
+width <- 0.90
+
+# get data frame in shape for ggplot and geom_rect
+results_owsa.2 <- results_owsa %>%
+  # gather columns Lower_Bound and Upper_Bound into a single column using gather
+  gather(key='type', value='output.value', Lower_Bound:Upper_Bound) %>%
+  # just reordering columns
+  dplyr::select(Parameter, type, output.value, UL_Difference) %>%
+  # create the columns for geom_rect
+  mutate(Parameter=factor(Parameter, levels=order.parameters),
+         ymin=pmin(output.value, base_case),
+         ymax=pmax(output.value, base_case),
+         xmin=as.numeric(Parameter)-width/2,
+         xmax=as.numeric(Parameter)+width/2)
+
+# create plot
+# (use scale_x_continuous to change labels in y axis to name of parameters)
+ggplot() + 
+  geom_rect(data = results_owsa.2, 
+            aes(ymax=ymax, ymin=ymin, xmax=xmax, xmin=xmin, fill=type)) +
+  ylab("Incremental QALYs") +
+  theme_bw() + 
+  theme(axis.title.y=element_blank(), legend.position = 'right',
+        legend.title = element_blank()) + 
+  geom_hline(yintercept = base_case) +
+  scale_x_continuous(breaks = c(1:length(order.parameters)), 
+                     labels = order.parameters) +
+  scale_fill_manual(labels=c("Lower value", "Upper value"), values = c("#ffba01", "#6ca9e6")) +
+  theme(text=element_text(size=10), axis.text.y = element_text(size = 10), legend.position = "bottom")+
+  coord_flip()
+
+#ggsave(here::here("output", "tornado_diagram_effects_AZA-IFX5-RIS-UPA.png"), width = 16, height = 16, units = c("cm"), dpi = 300)
+```
+
+### 08.3.3 NHB
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+results_owsa <- results_owsa_NHB
+results_owsa <- results_owsa[results_owsa$UL_Difference > 0.00001, ]
+base_case    <- base_case_result_a$NHB
+
+order.parameters <- results_owsa %>% arrange(UL_Difference) %>%
+  mutate(Parameter=factor(x=Parameter, levels=Parameter)) %>% 
+  dplyr::select(Parameter) %>% unlist() %>% levels() 
+
+# width of columns in plot (value between 0 and 1)
+width <- 0.90
+
+# get data frame in shape for ggplot and geom_rect
+results_owsa.2 <- results_owsa %>%
+  # gather columns Lower_Bound and Upper_Bound into a single column using gather
+  gather(key='type', value='output.value', Lower_Bound:Upper_Bound) %>%
+  # just reordering columns
+  dplyr::select(Parameter, type, output.value, UL_Difference) %>%
+  # create the columns for geom_rect
+  mutate(Parameter=factor(Parameter, levels=order.parameters),
+         ymin=pmin(output.value, base_case),
+         ymax=pmax(output.value, base_case),
+         xmin=as.numeric(Parameter)-width/2,
+         xmax=as.numeric(Parameter)+width/2)
+
+# create plot
+# (use scale_x_continuous to change labels in y axis to name of parameters)
+ggplot() + 
+  geom_rect(data = results_owsa.2, 
+            aes(ymax=ymax, ymin=ymin, xmax=xmax, xmin=xmin, fill=type)) +
+  ylab("NHB") +
+  theme_bw() + 
+  theme(axis.title.y=element_blank(), legend.position = 'right',
+        legend.title = element_blank()) + 
+  geom_hline(yintercept = base_case) +
+  scale_x_continuous(breaks = c(1:length(order.parameters)), 
+                     labels = order.parameters) +
+  scale_fill_manual(labels=c("Lower value", "Upper value"), values = c("#ffba01", "#6ca9e6")) +
+  theme(text=element_text(size=10), axis.text.y = element_text(size = 10), legend.position = "bottom")+
+  coord_flip()
+
+ggsave(here::here("visual output", "tornado_diagram_NHB_step_up.png"), width = 16, height = 25, units = c("cm"), dpi = 300)
+
+# # Export table with results
+# options(scipen = 999)
+# results_owsa_table <- data.frame(Parameters = results_owsa$Parameter,
+#                                  Lower_value = c(format(params_owsa$min, digits = 1), NA, NA, NA),
+#                                  Lower_NHB = format(results_owsa$Lower_Bound, digits = 2),
+#                                  Upper_value = c(format(params_owsa$max, digits = 1), NA, NA, NA),
+#                                  Upper_NHB = format(results_owsa$Upper_Bound, digits = 2))
+# colnames(results_owsa_table) <- c("Parameter", "Parameter value low", "NHB value low", "Parameter value high", "NHB value high")
+# View(results_owsa_table)
+# 
+# write.table(results_owsa_table, file = here::here("output", "results_owsa_table.txt"), sep = ";", quote = FALSE, row.names = F)
+
+```
+
+# 0.9 PSA
+# 0.9.1 Define PSA sequence
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+#Define sequences you wish to compare
+df_trtseq   <-  data.frame(line1=c("IFX+AZA" ,    "IFX5", "ADA40" ),
+                           line2=c("VED",     "VED","VED"),
+                           line3=c("UST",     "UST","UST"),
+                           line4=c("RIS",     "RIS","RIS"),
+                           line5=c("UPA",     "UPA","UPA"), stringsAsFactors = FALSE)
+v_names_str <- c(paste(df_trtseq$line1, df_trtseq$line2, df_trtseq$line3,df_trtseq$line4,df_trtseq$line5, sep="-"))
+n_str       <- length(v_names_str)      
+
+```
+
+# 0.9.2 Define input values
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+# PSA settings
+#NOTE1:   ~ running PSA = 8.8 sec per simulation per treatment sequence when n_i =  5.000 (2 sequences at 5 simulations = 8.8*2*5 = 88 sec, or 4.8 hours with n_sim = 1.000)
+#NOTE1:   ~ creating PSA input samples n_sim times from all 192 survival functions, for 3 survival function (i.e. time consuming). with 100 simulations it takes 21 minutes to create all survival functions, or similarly 21*10 = 210 minutes = 3.5 hours for n_sim = 1.000.
+
+
+n_sim                                           <- 1000  # Number of simulations 
+n_i                                             <- 1000 # Number of patients NOTE: if you want to run a smaller number, change n_i in section 3.1 and rerun that chunk too
+SD_assumption                                   <- 0.1 # When SD is unknown, assumption SD is a certain proportion of the mean value
+
+# print estimated duration
+how_long_will_psa_take                          <- 8.8*n_sim*length(v_names_str)
+print(paste("this PSA will take", how_long_will_psa_take, "seconds, or", how_long_will_psa_take/60, "minutes, or", how_long_will_psa_take/60/60, "hours" ))
+
+# generate inpute data
+set.seed(5)    
+
+gen_psa                                         <- function(n_sim = 100, seed = 071818){
+  with((l_params_all), {
+  set.seed(seed) # set a seed to be able to reproduce the same results
+  df_psa                                        <- data.frame(
+    # Background probabilities from meta-analysis to achieve remission / response
+    p_ACTREM_nai = rbeta(n_sim, beta_params_p_ACTREM_nai$alpha, beta_params_p_ACTREM_nai$beta), #sampled from meta-analysis with 16 studies 
+    p_ACTREM_exp = rbeta(n_sim, beta_params_p_ACTREM_exp$alpha, beta_params_p_ACTREM_exp$beta), #sampled from meta-analysis with 14 studies
+    
+    p_disc_placebo_nai =  rtruncnorm(n_sim, a = 0, b = 1, mean = 0.01987418, sd = ((0.02963436-0.01320308)/1.96)*sqrt(21)), #sampled from meta-analysis with 21 studies
+    p_disc_placebo_exp = rtruncnorm(n_sim, a = 0, b = 1, mean = 0.01885574, sd = ((0.02810157-0.01253761)/1.96)*sqrt(12)), #sampled from meta-analysis with 12 studies
+    
+    HR_EM_CD_F  = sample(c(1.8,1.7), n_sim, replace = T), #sample within confidence interval, no sd known
+    HR_EM_CD_M  = sample(c(1.4,1.5), n_sim, replace = T), #sample within confidence interval, no sd known
+    
+    # Utilities: multivariate normal sampling of regression model, added below
+    
+    # Costs
+    c_ACT               = rgamma(n_sim, shape = gamma_params(c_mrc_2023_ACT, sd_mrc_2023_ACT)$shape, 
+                                 scale =gamma_params(c_mrc_2023_ACT, sd_mrc_2023_ACT)$scale), 
+    c_REM               = rgamma(n_sim, shape = gamma_params(c_mrc_2023_REM, sd_mrc_2023_REM)$shape, 
+                                 scale =gamma_params(c_mrc_2023_REM, sd_mrc_2023_REM)$scale),
+    c_REM_ps            = rgamma(n_sim, shape = gamma_params(c_mrc_2023_REM, sd_mrc_2023_REM)$shape, 
+                                 scale =gamma_params(c_mrc_2023_REM, sd_mrc_2023_REM)$scale),
+    c_Surg              = rgamma(n_sim, shape = gamma_params(c_Surg, c_Surg*SD_assumption)$shape, 
+                                 scale =gamma_params(c_Surg, c_Surg*SD_assumption)$scale),
+    c_Surg_o            = rgamma(n_sim, shape = gamma_params(c_Surg_o, c_Surg_o*SD_assumption)$shape, 
+                                 scale =gamma_params(c_Surg_o, c_Surg_o*SD_assumption)$scale)
+    
+    )
+
+  return(df_psa)
+  }
+  )
+}
+
+#Add sampling from dataframes with covariance matrices (regressions & NMA) #use colMeans/colMedians to check if results work well
+PSA_utility_OLS                                 <- mvrnorm(n_sim, utility_OLS$coefficients[,1], vcov_utility_OLS) #Quality of life regression 
+PSA_NMA_ind_REM_nai                             <- exp(mvrnorm(n_sim, v_NMA_ind_REM_nai, m_ind_REM_nai))          #Remission NMA biologic naive
+PSA_NMA_ind_REM_exp                             <- exp(mvrnorm(n_sim, v_NMA_ind_REM_exp, m_ind_REM_exp))          #Remission NMA biologic exposed
+PSA_NMA_mai_REMRES_nai                          <- exp(mvrnorm(n_sim, v_NMA_mai_REMRES_nai, m_mai_REMRES_nai))    #Maintenance NMA biologic naive
+PSA_NMA_mai_REMRES_nai_L2                       <- exp(mvrnorm(n_sim, v_NMA_mai_REMRES_nai_L2, m_mai_REMRES_nai_L2))  #Maintenance NMA biologic naive
+PSA_NMA_mai_REMRES_exp                          <- exp(mvrnorm(n_sim, v_NMA_mai_REMRES_exp, m_mai_REMRES_exp))    #Maintenance NMA biologic exposed
+PSA_NMA_AE_nai                                  <- exp(mvrnorm(n_sim, v_NMA_AE_nai, m_NMA_AE_nai))                #AE related discontinuation NMA biologic naive
+PSA_NMA_AE_nai                                  <- ifelse(PSA_NMA_AE_nai > 10, 10, PSA_NMA_AE_nai) #avoid very large random RR's and limit them at 10
+PSA_NMA_AE_exp                                  <- exp(mvrnorm(n_sim, v_NMA_AE_exp, m_NMA_AE_exp))                #AE related discontinuation NMA biologic exposed
+PSA_NMA_AE_exp                                  <- PSA_NMA_AE_exp[,colnames(PSA_NMA_AE_exp) != 'Placebo:Vedolizumab 300 mg']
+PSA_NMA_AE_exp                                  <- cbind(PSA_NMA_AE_exp ,PSA_NMA_AE_exp[,'Adalimumab + Azathioprine / 6-mercaptopurine 40 mg + 25-50 mg / 30 mg:Placebo'])
+colnames(PSA_NMA_AE_exp)[ncol(PSA_NMA_AE_exp)]  <- "IFX+AZA:Placebo"
+PSA_NMA_AE_exp                                  <- cbind(PSA_NMA_AE_exp ,PSA_NMA_AE_exp[,'Adalimumab 40 mg:Placebo'])
+colnames(PSA_NMA_AE_exp)[ncol(PSA_NMA_AE_exp)]  <- "IFX5:Placebo"
+PSA_NMA_AE_exp                                  <- cbind(PSA_NMA_AE_exp ,PSA_NMA_AE_nai[,'Placebo:Ustekinumab 6 mg/kg'])
+colnames(PSA_NMA_AE_exp)[ncol(PSA_NMA_AE_exp)]  <- "Placebo:UST"
+PSA_NMA_AE_exp                                  <- ifelse(PSA_NMA_AE_exp > 10, 10, PSA_NMA_AE_exp) #avoid very large random RR's and limit them at 10
+
+#Add sampling from survival objects for all lines
+# first: define the extrapolation period
+times                                           <- seq(0, n_t, 1) # Extrapolation period
+# second: generate all potential combinations of covariates
+all_covariates                                  <- expand.grid(age_diag = as.factor(c("17-40", ">40")),
+                              loc      = as.factor(c("L1", "L2", "L3", "L4")),
+                              fen      = as.factor(c("B1", "B2", "B3")),
+                              sex      = as.factor(c("M", "F")),
+                              smoke    = as.factor(c("Y", "N")), 
+                              peri_a   = as.factor(c("Y", "N")))
+# third: sample new values for distribution & covariate parameters 
+df_PSA_input_FL1_sim                            <- normboot.flexsurvreg(s_df_tp_FL1, B= n_sim, newdata = all_covariates)
+df_PSA_input_FL2_nai_sim                        <- normboot.flexsurvreg(s_df_tp_FL2_nai, B= n_sim, newdata = all_covariates)
+df_PSA_input_FL2_exp_sim                        <- normboot.flexsurvreg(s_df_tp_FL2_exp, B= n_sim, newdata = all_covariates)
+df_PSA_input_AD_sim                             <- as.data.frame(normboot.flexsurvreg(s_df_tp_sur_AD, B= n_sim, newdata = all_covariates))
+df_PSA_input_OS_sim                             <- normboot.flexsurvreg(s_df_tp_sur_OS, B= n_sim, newdata = all_covariates)
+# fourth: create empty lists that the extraction functions can use
+l_PSA_input_FL1                                 <- list()
+l_PSA_input_FL2_nai                             <- list()
+l_PSA_input_FL2_exp                             <- list()
+l_PSA_input_AD                                  <- list()
+l_PSA_input_OS                                  <- list()
+
+# fifth: run the functions to create new input data for the PSA for the survival functions
+#NOTE: this takes very long, so we may prefer to load in the results of the previous exercise
+tic()
+df_PSA_input_FL1                                <- f_extract_tp_PSA(all_covariates, s_df_tp_FL1,     df_PSA_input_FL1_sim, n_sim, "gamma",times, n_cores = detectCores() - 1) 
+df_PSA_input_FL2_nai                            <- f_extract_tp_PSA(all_covariates, s_df_tp_FL2_nai,     df_PSA_input_FL2_nai_sim, n_sim, "lnorm",times, n_cores = detectCores() - 1) 
+df_PSA_input_FL2_exp                            <- f_extract_tp_PSA(all_covariates, s_df_tp_FL2_exp,     df_PSA_input_FL2_exp_sim, n_sim, "lnorm",times, n_cores = detectCores() - 1)
+df_PSA_input_AD                                 <- 1-exp(-(df_PSA_input_AD_sim)) #exponential function, no covariates
+df_PSA_input_OS                                 <- f_extract_tp_PSA(all_covariates, s_df_tp_sur_OS,     df_PSA_input_OS_sim, n_sim, "lnorm",times, n_cores = detectCores() - 1)
+toc()
+
+#Create parameters that are needed for the model but not varied in PSA function above but separately (because they are dataframes or are not varied)
+ age                                            <- l_params_all$age
+ sd_age                                         <- l_params_all$sd_age
+ #Placebo probability to achieve remission or response inputs
+ 
+ #Excess mortality inputs
+ HR_EM_CD_F                                     <- l_params_all$HR_EM_CD_F           
+ HR_EM_CD_M                                     <- l_params_all$HR_EM_CD_M           
+ #Cost inputs
+ c_prod_days_unpaid                             <- l_params_all$c_prod_days_unpaid   
+ c_prod_days_caregiver                          <- l_params_all$c_prod_days_caregiver
+ c_prod_paid_ACT                                <- l_params_all$c_prod_paid_ACT      
+ c_prod_paid_RESREM                             <- l_params_all$c_prod_paid_RESREM   
+ u_D                                            <- l_params_all$u_D                  
+ #NMA inputs
+ df_NMA_ind_REM_nai_L1                          <- l_params_all$df_NMA_ind_REM_nai_L1    
+ df_NMA_ind_REM_nai_L2                          <- l_params_all$df_NMA_ind_REM_nai_L2    
+ df_NMA_ind_REM_exp_L2                          <- l_params_all$df_NMA_ind_REM_exp_L2    
+ df_NMA_ind_REM_exp_L3                          <- l_params_all$df_NMA_ind_REM_exp_L3    
+ df_NMA_ind_REM_exp_L4                          <- l_params_all$df_NMA_ind_REM_exp_L4    
+ df_NMA_ind_REM_exp_L5                          <- l_params_all$df_NMA_ind_REM_exp_L5    
+ df_NMA_mai_REMRES_nai_L1                       <- l_params_all$df_NMA_mai_REMRES_nai_L1 
+ df_NMA_mai_REMRES_nai_L2                       <- l_params_all$df_NMA_mai_REMRES_nai_L2 
+ df_NMA_mai_REMRES_exp_L2                       <- l_params_all$df_NMA_mai_REMRES_exp_L2 
+ df_NMA_mai_REMRES_exp_L3                       <- l_params_all$df_NMA_mai_REMRES_exp_L3 
+ df_NMA_mai_REMRES_exp_L4                       <- l_params_all$df_NMA_mai_REMRES_exp_L4 
+ df_NMA_mai_REMRES_exp_L5                       <- l_params_all$df_NMA_mai_REMRES_exp_L5 
+ df_NMA_AE_nai                                  <- l_params_all$df_NMA_AE_nai        
+ df_NMA_AE_exp                                  <- l_params_all$df_NMA_AE_exp        
+ df_c_trt                                       <- l_params_all$df_c_trt             
+ df_FMC                                         <- l_params_all$df_FMC
+ cl_wk                                          <- l_params_all$cl_wk
+ #Baseline characteristics of patient population (sampled from covariance matrix IBD-ZL registry)
+ baseline                                       <- l_params_all$baseline
+ # will be varied but needed in the list for PSA
+ df_u_coef                                      <- l_params_all$df_u_coefl_params_all$df_tp_FL1_AZA   
+ df_tp_FL1_AZA                                  <- l_params_all$df_tp_FL1_AZA   
+ df_tp_FL2_IFX                                  <- l_params_all$df_tp_FL2_IFX   
+ df_tp_FL2_UST                                  <- l_params_all$df_tp_FL2_UST   
+ df_tp_sur_other                                <- l_params_all$df_tp_sur_other 
+ df_tp_sur_active                               <- l_params_all$df_tp_sur_active
+ 
+
+
+# test run the PSA function
+gen_psa(10) 
+
+# Generate PSA input dataset
+df_psa_input                                    <- gen_psa(n_sim = n_sim)
+
+# First six observations
+head(df_psa_input)
+
+# Initialize dataframes with PSA output
+# Data frame of costs
+df_c                                            <- as.data.frame(matrix(0,
+                            nrow = n_sim,
+                            ncol = n_str))
+colnames(df_c)                                  <- v_names_str
+
+# Data frame of effectiveness
+df_e                                            <- as.data.frame(matrix(0,
+                            nrow = n_sim,
+                            ncol = n_str))
+colnames(df_e)                                  <- v_names_str
+
+#save(df_PSA_input_FL1, df_PSA_input_FL2_nai,df_PSA_input_FL2_exp,df_PSA_input_AD, df_PSA_input_OS, file = here::here("input", "PSA_survival_objects.RData"))
+#note you can save the survival function PSA objects, but the file becomes too large for github tracking (1.59GB)
+
+```
+
+# 0.9.3 Run the PSA
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+PSA <- T
+
+# Use multiple cores
+cores <- detectCores()        # define number of cores available
+cl    <- makeCluster(cores-1) # assign cores -2 to be able to work
+registerDoSNOW(cl)            # open up multi-thread command
+
+clusterExport(cl, c('MicroSim', 'f_create_df_X', 'f_v_M_init', 'n_i', 'rtruncnorm', 'v_n', 'n_t',  'Costs', 'Effs', 'Probs', 
+                    'cl_wk', 't_ind_IFX5','t_ind_IFX10', 't_ind_IFX_AZA', 't_ind_ADA40','t_ind_ADA80','t_ind_ADA_AZA','t_ind_VED','t_ind_UST','t_ind_UPA',
+                    't_ind_AZA','t_ind_RIS','t_ind_MTX', 'f_extract_prob', 'n_states', 'df_mort', "p_disc_placebo_nai", "p_disc_placebo_exp", 'v_dwc', 'v_dwe', 'PSA' ))
+
+iterations <- nrow(df_trtseq)
+pb         <- txtProgressBar(max = iterations, style = 3)
+progress   <- function(n) setTxtProgressBar(pb, n)
+opts       <- list(progress = progress)
+pb = txtProgressBar(min = 0, max = n_sim, initial = 0)
+
+tic()
+for(i in 1:n_sim){
+  
+l_params_all                    <- list(
+        age = age,
+        sd_age = sd_age,
+        #Placebo probability to achieve remission or response inputs
+        p_ACTRES_nai          = df_psa_input$p_ACTRES_nai[i]         ,
+        p_ACTRES_exp          = df_psa_input$p_ACTRES_exp[i]         ,
+        p_ACTREM_nai          = df_psa_input$p_ACTREM_nai[i]         ,
+        p_ACTREM_exp          = df_psa_input$p_ACTREM_exp[i]         ,
+        #Excess mortality inputs
+        HR_EM_CD_F            = HR_EM_CD_F           ,
+        HR_EM_CD_M            = HR_EM_CD_M           ,
+        #Cost inputs
+        c_ACT                 = df_psa_input$c_ACT[i]                ,
+        c_REM                 = df_psa_input$c_REM[i]                ,
+        c_REM_ps              = df_psa_input$c_REM_ps[i]             ,
+        c_RES                 = df_psa_input$c_RES[i]                ,
+        c_Surg                = df_psa_input$c_Surg[i]               ,
+        c_Surg_o              = df_psa_input$c_Surg_o[i]             ,
+        c_prod_days_unpaid    = c_prod_days_unpaid   ,
+        c_prod_days_caregiver = c_prod_days_caregiver,
+        c_prod_paid_ACT       = c_prod_paid_ACT      ,
+        c_prod_paid_RESREM    = c_prod_paid_RESREM   ,
+        u_D                   = u_D                  ,
+        #NMA inputs
+        df_NMA_ind_REM_nai_L1    = df_NMA_ind_REM_nai_L1    ,
+        df_NMA_ind_REM_nai_L2    = df_NMA_ind_REM_nai_L2    ,
+        df_NMA_ind_REM_exp_L2    = df_NMA_ind_REM_exp_L2    ,
+        df_NMA_ind_REM_exp_L3    = df_NMA_ind_REM_exp_L3    ,
+        df_NMA_ind_REM_exp_L4    = df_NMA_ind_REM_exp_L4    ,
+        df_NMA_ind_REM_exp_L5    = df_NMA_ind_REM_exp_L5    ,
+        df_NMA_mai_REMRES_nai_L1 = df_NMA_mai_REMRES_nai_L1 ,
+        df_NMA_mai_REMRES_nai_L2 = df_NMA_mai_REMRES_nai_L2 ,
+        df_NMA_mai_REMRES_exp_L2 = df_NMA_mai_REMRES_exp_L2 ,
+        df_NMA_mai_REMRES_exp_L3 = df_NMA_mai_REMRES_exp_L3 ,
+        df_NMA_mai_REMRES_exp_L4 = df_NMA_mai_REMRES_exp_L4 ,
+        df_NMA_mai_REMRES_exp_L5 = df_NMA_mai_REMRES_exp_L5 ,
+        df_NMA_AE_nai         = df_NMA_AE_nai        ,
+        df_NMA_AE_exp         = df_NMA_AE_exp        ,
+        df_c_trt              = df_c_trt             ,
+        df_FMC                = df_FMC,
+        cl_wk                 = cl_wk,
+        #Baseline characteristics of patient population (sampled from covariance matrix IBD-ZL registry)
+        baseline              = baseline,
+        df_tp_FL1_AZA         = df_tp_FL1_AZA   ,
+        df_tp_FL2_IFX         = df_tp_FL2_IFX   ,
+        df_tp_FL2_UST         = df_tp_FL2_UST   ,
+        df_tp_sur_other       = df_tp_sur_other ,
+        df_tp_sur_active      = df_tp_sur_active)
+       
+        #OLS regression on utilities (IB-DREAM registry)
+        l_params_all$df_u_coef[1:13]          <- PSA_utility_OLS[i,1:13]
+        
+        #NMA objects (all but RESPONSE, as this NMA does not hold all treatments used in model)
+        l_params_all$df_NMA_ind_REM_nai_L1$RR[l_params_all$df_NMA_ind_REM_nai$Treatment != "Placebo"] <- PSA_NMA_ind_REM_nai[i,]
+        l_params_all$df_NMA_ind_REM_nai_L2$RR[l_params_all$df_NMA_ind_REM_nai$Treatment != "Placebo"] <- PSA_NMA_ind_REM_nai[i,]
+        l_params_all$df_NMA_ind_REM_exp_L2$RR[l_params_all$df_NMA_ind_REM_exp$Treatment != "Placebo"] <- PSA_NMA_ind_REM_exp[i,]
+        l_params_all$df_NMA_ind_REM_exp_L3$RR[l_params_all$df_NMA_ind_REM_exp$Treatment != "Placebo"] <- PSA_NMA_ind_REM_exp[i,]
+        l_params_all$df_NMA_ind_REM_exp_L4$RR[l_params_all$df_NMA_ind_REM_exp$Treatment != "Placebo"] <- PSA_NMA_ind_REM_exp[i,]
+        l_params_all$df_NMA_ind_REM_exp_L5$RR[l_params_all$df_NMA_ind_REM_exp$Treatment != "Placebo"] <- PSA_NMA_ind_REM_exp[i,]
+        l_params_all$df_NMA_mai_REMRES_nai_L1$RR[l_params_all$df_NMA_mai_REMRES_nai$Treatment != "Azathioprine 2-2.5 mg/kg"] <- PSA_NMA_mai_REMRES_nai[i,]
+        l_params_all$df_NMA_mai_REMRES_nai_L2$RR[l_params_all$df_NMA_mai_REMRES_naiL2$Treatment != "Infliximab 5 mg/kg"] <- PSA_NMA_mai_REMRES_nai_L2[i,]
+        l_params_all$df_NMA_mai_REMRES_exp_L2$RR[l_params_all$df_NMA_mai_REMRES_exp$Treatment != "Ustekinumab 90 mg"] <- PSA_NMA_mai_REMRES_exp[i,]
+        l_params_all$df_NMA_mai_REMRES_exp_L3$RR[l_params_all$df_NMA_mai_REMRES_exp$Treatment != "Ustekinumab 90 mg"] <- PSA_NMA_mai_REMRES_exp[i,]
+        l_params_all$df_NMA_mai_REMRES_exp_L4$RR[l_params_all$df_NMA_mai_REMRES_exp$Treatment != "Ustekinumab 90 mg"] <- PSA_NMA_mai_REMRES_exp[i,]
+        l_params_all$df_NMA_mai_REMRES_exp_L5$RR[l_params_all$df_NMA_mai_REMRES_exp$Treatment != "Ustekinumab 90 mg"] <- PSA_NMA_mai_REMRES_exp[i,]
+        l_params_all$df_NMA_AE_nai$RR[l_params_all$df_NMA_AE_nai$Treatment != "Placebo"][1:(length(l_params_all$df_NMA_AE_nai$RR[l_params_all$df_NMA_AE_nai$Treatment != "Placebo"])-2)] <- PSA_NMA_AE_nai[i,]
+        l_params_all$df_NMA_AE_exp$RR[l_params_all$df_NMA_AE_exp$Treatment != "Placebo"][1:(length(l_params_all$df_NMA_AE_exp$RR[l_params_all$df_NMA_AE_exp$Treatment != "Placebo"])-2)] <- PSA_NMA_AE_exp[i,]
+        
+        #survival objects
+        l_params_all$df_tp_FL1_AZA$transprob <- df_PSA_input_FL1[,i]
+        l_params_all$df_tp_FL2_IFX$transprob <- df_PSA_input_FL2_nai[,i]
+        l_params_all$df_tp_FL2_UST$transprob <- df_PSA_input_FL2_exp[,i]
+        l_params_all$df_tp_sur_other$transprob <- df_PSA_input_OS[,i]
+        l_params_all$df_tp_sur_active <- df_PSA_input_AD[i,]
+        
+# Run the simulation
+results <- foreach(g = 1:nrow(df_trtseq), .options.snow = opts,
+                   .packages = c("dplyr", "darthtools")) %dopar% { # dplyr voor if_else, darthtools voor sample v
+                                   MicroSim(l_params_all, n_i, df_X, TRT1 = df_trtseq[g,1], TRT2 = df_trtseq[g,2], 
+                                            TRT3 = df_trtseq[g,3], TRT4 = df_trtseq[g,4],TRT5 = df_trtseq[g,5], seed = 1)
+                   }
+
+
+                     temp_v_C <- NULL
+    for (j in 1:length(results)){
+    temp_v_C[j]<- results[[j]]$tc_hat
+    }
+
+  temp_v_E <- NULL
+    for (j in 1:length(results)){
+    temp_v_E[j]<- results[[j]]$te_hat
+   }
+
+  df_c[i, ] <- c(temp_v_C)   # take the cost from the psa run and store in df_c
+  df_e[i, ] <- c(temp_v_E)   # take the effect from the psa run in store in a df_e
+
+ 
+setTxtProgressBar(pb,i) # Display simulation progress                       
+}
+toc()
+
+# Stop using multiple cores
+stopCluster(cl)
+stopImplicitCluster()
+
+wtp <- 20000
+
+# Save results
+psa_seq_results           <- data.frame(cost   = gather(df_c, key = treatment, value = costs),  
+                                        effect = gather(df_e, key = treatment, value = effect))
+psa_seq_results           <- psa_seq_results[, -3]
+colnames(psa_seq_results) <- c("treatment", "costs", "effects")
+psa_seq_results$NHB       <- psa_seq_results$effects - (psa_seq_results$costs/wtp) 
+
+save(psa_seq_results, file = here::here("output", "PSA_all_1000_1000.RData"))
+
+
+
+#CE boxplot of all treatments
+ggplot(psa_seq_results, aes(x= reorder(treatment, -NHB) , y=NHB, colour=treatment)) +
+  geom_boxplot(outlier.shape=16,
+             outlier.size=0.5, show.legend = FALSE) +
+  #geom_point(aes(x=colMeans(df_e), y=colMeans(df_c), size = 10), show.legend = FALSE)+
+  #stat_ellipse(size = 1, show.legend = FALSE) +
+   #scale_color_manual(values = wes_palette("Zissou1", n = 445)) +
+  theme_bw() +
+  scale_y_continuous(name="Net health benefit") +
+  xlab("Treatment")
+
+#PSA object of all treatments
+df_psa_obj <- make_psa_obj(cost = df_c, 
+                           effectiveness =  df_e, 
+                           strategies = v_names_str) #note: check with authors of dampack packages, gives error in summary
+
+plot(df_psa_obj)
+                     
+```
+# 0.9.5 Visualize PSA results
+
+
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+##this section contains code to plot the PSA results. It has 4 parts:
+# 1: reading in the data and preparing it
+# 2: plot for absolute results for specific treatments
+# 3: plot for comparing incremental results of specific treatments
+# 4: plot for incremental all incremental results
+
+# 1: reading in the data and preparing it
+#read in PSA results
+load(here::here("Output", "PSA_all_1000_1000.RData"))
+
+#rewrite dataframe to incremental values
+#ALL TREATMENTS
+psa_seq_results$i <- rep(seq(1,1000,by=1), 228)
+reference_treatment_name <- "IFX+AZA-UPA-RIS-UST-VED" #Define reference treatment for PSA here
+psa_seq_results <- psa_seq_results %>%
+  group_by(i) %>%
+  mutate(
+    reference_cost = costs[treatment == reference_treatment_name][1],
+    reference_effect = effects[treatment == reference_treatment_name][1],
+    incremental_cost = costs - reference_cost,
+    incremental_effect = effects - reference_effect,
+    reference_treatment = reference_treatment_name
+  ) %>%
+  ungroup()
+
+
+
+#create a summary of the results
+psa_summary <- data.frame(cost_mean = aggregate(costs ~ treatment, psa_seq_results, mean),
+                          cost_se   = aggregate(costs ~ treatment, psa_seq_results, sd),
+                          QALY_mean = aggregate(effects ~ treatment, psa_seq_results, mean),
+                          QALY_se   = aggregate(effects ~ treatment, psa_seq_results, sd),
+                          NHB_mean  = aggregate(NHB ~ treatment, psa_seq_results, mean),
+                          NHB_se    = aggregate(NHB ~ treatment, psa_seq_results, sd))
+psa_summary <- psa_summary[, -c(3,5,7,9,11,13)]
+psa_summary <- psa_summary[, -c(3,5,7)]
+colnames(psa_summary) <- c("Treatment_sequence", "Cost", "QALYs", "NHB" )
+
+#split summary file in escalation and top down treatments
+psa_summary_top_down <- psa_summary[!grepl("^(AZA|MTX)",psa_summary[,1]), ]
+psa_summary_top_down <- cbind(psa_summary_top_down[, 1], separate(psa_summary_top_down, col = "Treatment_sequence", c("L1","L2","L3","L4", "L5"), "-"))
+colnames(psa_summary_top_down)[colnames(psa_summary_top_down) == 'psa_summary_top_down[, 1]'] <- 'Treatment_sequence'
+
+psa_summary_step_up  <- psa_summary[grepl("^(AZA|MTX)",psa_summary[,1]), ]
+psa_summary_step_up <- cbind(psa_summary_step_up[, 1], separate(psa_summary_step_up, col = "Treatment_sequence", c("L1","L2","L3","L4", "L5"), "-"))
+colnames(psa_summary_step_up)[colnames(psa_summary_step_up) == 'psa_summary_step_up[, 1]'] <- 'Treatment_sequence'
+
+## make rank plot of results
+
+## Step up
+make_rank_plot_psa(data = psa_summary_step_up, 
+               rank = -psa_summary_step_up$`NHB`,
+               outcome = "NHB",
+               savename = "PSA step up", 
+               plottitle = "Drug treatment ranking (NHB)",
+               scenario = "PSA Step up sequences",
+               top = round(nrow(psa_summary_step_up)*0.2))  
+#note, the figure represents: proportion of n_i that goes on induction and proportion of those on induction who go to maintenance
+
+
+## Top down
+make_rank_plot_psa(data = psa_summary_top_down, 
+               rank = -psa_summary_top_down$`NHB`,
+               outcome = "NHB",
+               savename = "PSA top down", 
+               plottitle = "Drug treatment ranking (NHB)",
+               scenario = "PSA Top down sequences",
+               top = round(nrow(psa_summary_top_down)*0.2))
+
+
+#2: #create dataframe for the comparison you want to make
+#one comparison
+df_psa <- psa_seq_results[psa_seq_results$treatment == "MTX-IFX+AZA-UPA-VED-RIS",]
+#multiple comparisons
+df_psa <- rbind(psa_seq_results[psa_seq_results$treatment == "IFX+AZA-RIS-UPA-UST-VED",], psa_seq_results[psa_seq_results$treatment == "IFX+AZA-UST-UPA-RIS-VED",], psa_seq_results[psa_seq_results$treatment == "IFX+AZA-VED-UPA-UST-RIS",])
+
+
+# Plot absolute results (use multiple comparisons code)
+NICER <- c( "#006A82","#E53A63")
+ggplot(psa_top_down, aes(x=effects, y=costs, colour=treatment)) +
+  geom_point(size = 1, shape = 16) +
+  stat_ellipse(size = 2) +
+  #scale_color_manual(labels=c("IFX5-RIS-VED-UPA-UST", "IFX+AZA-UPA-VED-UST-RIS"), values = NICER) +
+  labs(color="") +
+  #scale_y_continuous(name="", labels = dollar_format(prefix = "€", big.mark=".", decimal.mark = ",")) +
+  ylab("Costs") +
+  xlab("QALYs") +
+  #geom_point(aes(x=mean(effects[treatment == "IFX5-RIS-VED-UPA-UST"]), y = mean(costs[treatment == "IFX5-RIS-VED-UPA-UST"])), colour="black", fill="#E53A63", shape = 21, size = 5, stroke=1) +
+  #geom_point(aes(x=mean(effects[treatment == "IFX+AZA-UPA-VED-UST-RIS"]), y = mean(costs[treatment == "IFX+AZA-UPA-VED-UST-RIS"])), colour="black",  fill="#006A82",  shape = 21, size = 5, stroke=1)+ 
+  theme_minimal()+
+  theme(legend.position = "top")
+
+#3 # Plot incremental results (use single comparison)
+ggplot(df_psa, aes(x=incremental_effect, y=incremental_cost)) +
+  geom_point(size = 0.3, shape = 16, color = "darkblue") +
+  #stat_ellipse(size = 1, color = "darkblue") +
+  scale_y_continuous(name="", labels = dollar_format(prefix = "€", big.mark=".", decimal.mark = ",")) +
+  ylab("Costs") +
+  xlab("QALYs") +
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  geom_abline(intercept = 0, slope = 20000, linetype="dashed", lwd=1)+
+  #annotate("text", x = -0.5, y = -45000, label = "€20,000/QALY threshold")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5), 
+        plot.caption = element_text(color = "darkblue", hjust = 0.5)) + 
+  labs(title = "CE-plane", 
+       subtitle = "Best vs worst step-up treatment",
+       caption = "AZA-UST-RIS-VED-UPA vs AZA-IFX+AZA-UPA-VED-RIS")
+ggsave(here::here("visual output", "MTX vs AZA.jpg"), width = 16, height = 8, units = c("cm"), dpi = 300)
+
+# 4 Plot incremental results all treatments
+ggplot(df_psa, aes(x=incremental_effect, y=incremental_cost, colour=treatment)) +
+  geom_point(size = 1, shape = 16) +
+  #stat_ellipse(size = 1, color = "darkblue") +
+  scale_y_continuous(name="", labels = dollar_format(prefix = "€", big.mark=".", decimal.mark = ",")) +
+  ylab("Incremental Costs") +
+  xlab("Incremental QALYs") +
+  geom_vline(xintercept = 0)+
+  geom_hline(yintercept = 0)+
+  geom_abline(intercept = 0, slope = 20000, linetype="dashed", lwd=1)+
+  annotate("text", x = -0.4, y = -25000, label = "€20,000/QALY threshold", linewidth = 3)+
+  theme_minimal()+
+labs(title = "CE-plane", 
+       subtitle = "Step-up first line treatment MTX vs AZA")
+  ggsave(here::here("visual output", "other vs upa.jpg"), width = 16, height = 8, units = c("cm"), dpi = 300)
+  #theme(legend.position = "none")
+
+# 5 ## CEAC for single comparison
+n_sim <- 1000
+inc_effects <- df_psa$incremental_effect
+inc_costs   <-  df_psa$incremental_cost
+
+ CEAC = function(x){
+  sum((((x*inc_effects)-inc_costs) > 0)/n_sim)
+}
+ 
+    thresholds <- matrix(seq(from=0, to=200000, by=10),
+                         nrow=20001,
+                         ncol=1)
+ 
+    prob <- apply(thresholds, 1, CEAC)
+ 
+ 
+# Combine data from line 1 and 2 into 1 dataframe    
+CEAC_data <- data.frame("thresholds" = thresholds,
+                        "prob" = prob)    
+# Create CEAC
+ggplot(data = CEAC_data,
+       aes(x = thresholds, y = prob)) + geom_line(lwd = 1) +  
+       coord_cartesian(xlim = c(0, 200000), ylim = c(0, 1)) +
+       scale_y_continuous(breaks = seq(0, 1, .2)) +
+       scale_x_continuous(breaks = seq(0, 200000, 50000), labels = dollar_format(prefix="€")) +
+       theme_bw(base_size = 10)+
+       xlab("Maximum willingness to pay threshold for a QALY gained") + ylab("Probability that sequence with OCR is optimal") +
+       guides(color=guide_legend(title=""))
+
+CEAC_data[which(CEAC_data$thresholds==20000), ]
+CEAC_data[which(CEAC_data$thresholds==50000), ]
+CEAC_data[which(CEAC_data$thresholds==80000), ]
+
+# 6 ##CEAC for multiple comparison
+##Costs
+psa_c_incr_UPA_RIS <- df_psa$incremental_cost[1:1000]
+psa_c_incr_UPA_UST <- df_psa$incremental_cost[1001:2000]
+psa_c_incr_UPA_VED <- df_psa$incremental_cost[2001:3000]
+
+##Effects
+psa_e_incr_UPA_RIS <- df_psa$incremental_effect[1:1000]
+psa_e_incr_UPA_UST <- df_psa$incremental_effect[1001:2000]
+psa_e_incr_UPA_VED <- df_psa$incremental_effect[2001:3000]
+ 
+ 
+ 
+n_sim <- 1000
+ 
+CEAC_UPA_RIS = function(x){
+  sum((((x*psa_e_incr_UPA_RIS)-psa_c_incr_UPA_RIS) > 0)/n_sim)
+}
+ 
+CEAC_UPA_UST = function(x){
+  sum((((x*psa_e_incr_UPA_UST)-psa_c_incr_UPA_UST) > 0)/n_sim)
+}
+
+CEAC_UPA_VED = function(x){
+  sum((((x*psa_e_incr_UPA_VED)-psa_c_incr_UPA_VED) > 0)/n_sim)
+}
+ 
+    thresholds <- matrix(seq(from=0, to=200000, by=10),
+                         nrow=20001,
+                         ncol=1)
+ 
+    prob_UPA_RIS <- apply(thresholds, 1, CEAC_UPA_RIS)
+    prob_UPA_UST <- apply(thresholds, 1, CEAC_UPA_UST)
+    prob_UPA_VED <- apply(thresholds, 1, CEAC_UPA_VED)
+ 
+ 
+# Combine data from line 1 and 2 into 1 dataframe    
+CEAC_data <- data.frame("thresholds" = thresholds,
+                        "prob_UPA_RIS" = prob_UPA_RIS,
+                        "prob_UPA_UST" = prob_UPA_UST,
+                        "prob_UPA_VED" = prob_UPA_VED) 
+CEAC_data_l  <- gather(CEAC_data, Line, prob, prob_UPA_RIS:prob_UPA_VED)
+ 
+# Create CEAC
+ggplot(data = CEAC_data_l,
+       aes(x = thresholds, y = prob, color = Line)) + geom_line(lwd = 1) +  
+       coord_cartesian(xlim = c(0, 200000), ylim = c(0, 1)) +
+       scale_y_continuous(breaks = seq(0, 1, .2)) +
+       scale_x_continuous(breaks = seq(0, 200000, 50000), labels = dollar_format(prefix="€")) +
+       theme_bw(base_size = 10)+
+       #scale_color_manual(labels = c("UPA vs. RIS", "UPA vs. UST", "UPA vs. VED") + #, values = c("#EBDEF0", "#C39BD3")) +
+       xlab("Maximum willingness to pay threshold for a QALY gained") + ylab("Probability that sequence is optimal") +
+       guides(color=guide_legend(title=""))
+ 
+CEAC_data[which(CEAC_data$thresholds==20000), ]
+CEAC_data[which(CEAC_data$thresholds==50000), ]
+CEAC_data[which(CEAC_data$thresholds==80000), ]
+
+
+```
+
+
+# 0.9.6 Value of information analysis
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+#In this section we first create a new data frame of the PSA results that can be read by the calc_evpi package of dampack
+
+df_psa_obj <- make_psa_obj(cost = df_c, 
+                           effectiveness =  df_e, 
+                           strategies = v_names_str) #note: check with authors of dampack packages, gives error in summary
+
+plot(df_psa_obj)
+
+wtp <- seq(1e4, 1e5, by = 1e4)#20000 #calculated with sequence: azathioprine-infliximab+azathioprine-ustekinumab-vedolizumab-risankizumab, 22.73 QALYs = 21% loss vs gen.pop 
+evpi <- calc_evpi(df_psa_obj, wtp, pop = 1)
+icer <- calculate_icers_psa(df_psa_obj)
+evpi
+icer
+plot(evpi)
+
+```
+
+
+# 0.9.7 Test model stability in deterministic setting
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+#In this section we loop over a change in the sample size and then check the stability of the calculated NHB
+#We resample the population when doing so
+
+
+library(parallel)
+library(foreach)
+library(doParallel)
+
+# Function to process a single iteration for a given sample size
+process_iteration <- function(i, n_i, l_params_all, df_X) {
+  outcomes_no_trt <- MicroSim(l_params_all, n_i, df_X, 
+                             TRT1 = "MTX", TRT2 = "IFX+AZA", TRT3 = "UST", 
+                             TRT4 = "UPA", TRT5 = "RIS", seed = i)
+  
+  outcomes_trt <- MicroSim(l_params_all, n_i, df_X, 
+                          TRT1 = "AZA", TRT2 = "IFX+AZA", TRT3 = "UST", 
+                          TRT4 = "UPA", TRT5 = "RIS", seed = i)
+  
+  v_C <- mean(outcomes_trt$tc_hat - outcomes_no_trt$tc_hat)
+  v_E <- mean(outcomes_trt$te_hat - outcomes_no_trt$te_hat)
+  
+  return(v_C/v_E)
+}
+
+# Main analysis with parallel processing
+PSA <- TRUE  # if TRUE stores less variables for 'faster' computing
+iterations <- 20
+n_i_options <- c(100, 500, 1000,5000,10000,15000,20000,30000,50000,100000)
+df_icers <- matrix(nrow=iterations, ncol=length(n_i_options))
+colnames(df_icers) <- n_i_options
+
+# Setup parallel processing
+num_cores <- detectCores() - 1  # Leave one core free for system processes
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Export necessary objects to the cluster
+clusterExport(cl, c('MicroSim', 'f_create_df_X', 'f_v_M_init', 'n_i', 'rtruncnorm', 'v_n', 'n_t',  'Costs', 'Effs', 'Probs', 
+                    'cl_wk', 't_ind_IFX5','t_ind_IFX10', 't_ind_IFX_AZA', 't_ind_ADA40','t_ind_ADA80','t_ind_ADA_AZA','t_ind_VED','t_ind_UST','t_ind_UPA',
+                    't_ind_AZA','t_ind_RIS','t_ind_MTX', 'f_extract_prob', 'df_tp_FL1_AZA', 'df_tp_FL2_IFX','df_tp_FL2_UST','df_tp_sur_other',
+                    'df_tp_sur_active', 'n_states', 'df_mort', "p_disc_placebo_nai", "p_disc_placebo_exp", 'v_dwc', 'v_dwe', "df_mu", "df_cor"))
+
+# Main loop over sample sizes
+for (j in 1:length(n_i_options)) {
+  n_i <- n_i_options[j]
+  
+  # Resample baseline characteristics
+  baseline <- as.data.frame(rmvbin(n_i, df_mu, sigma = df_cor))
+  colnames(baseline) <- colnames(df_cor)
+  baseline$peri_a_Y <- ifelse(baseline$peri_a_N == 1, 0, 1)
+  baseline$smoke_N <- ifelse(baseline$smoke_N == 1, 0, 1)
+  l_params_all$baseline <- baseline
+  
+  # Parallel processing of iterations
+  results <- foreach(i = 1:iterations, 
+                    .combine = 'c',
+                    .packages = c("dplyr", "darthtools")) %dopar% {
+    process_iteration(i, n_i, l_params_all, df_X)
+  }
+  
+  df_icers[,j] <- results
+  cat(paste0(round(j / length(n_i_options) * 100), '% completed\n'))
+}
+
+# Stop the cluster
+stopCluster(cl)
+
+# Results are stored in df_icers matrix, same as before
+
+
+#colnames(df_icers) <- c("5000", "10000", "20000", "50000", "100000", "200000")
+#colnames(df_icers) <- c("100", "500", "1,000")
+df_icers
+
+df_sd_icers <- apply(df_icers,2,sd)
+df_sd_icers
+
+#write.csv(df_icers, here::here("output", "check_sample_size.csv"))
+
+data <- read.csv(here::here("output", "check_sample_size.csv"), header = T)
+data <- data[, -1]
+
+
+colnames(data) <- c("100", "500", "1,000", "5,000", "10,000", "20,000", "50,000", "100,000", "200,000")
+
+boxplot(df_icers, xlab = "Number of patients sampled", ylab = "ICERs", ylim = c(200000,-200000) ) 
+title("Boxplot of ICERs by sampling size for 20 seeds", adj = 0)
+
+data2 <- gather(data = as.data.frame(df_icers), key=size, value = icer)
+ggplot(data2, aes(x=size, y=icer)) + 
+  geom_boxplot() +
+  ylab("ICER")+
+  xlab("Number of patients sampled")+
+  scale_x_discrete(limits=c("100", "500", "1000","5000","10000","15000","20000","30000","50000","100000"))+
+  theme_minimal()+
+  scale_y_continuous(labels=dollar_format(prefix="€"), limits = (c(-200000,200000))) +
+    theme(text=element_text(size=10), axis.text.y = element_text(size = 10), axis.text.x = element_text(size = 10))
+ggsave(here::here("output", "check_samplesize.jpg"), width = 16, height = 8, units = c("cm"), dpi = 300)
+
+
+## old non-parallel code
+#
+#PSA <- T # if TRUE stores less variables for 'faster' computing
+#
+##Number of sample sizes to be tested
+#iterations <- 20
+##n_i_options <- c(5000, 10000, 20000, 50000, 100000, 200000)
+#n_i_options <- c(100, 500, 1000)
+#df_icers <- matrix(nrow=iterations, ncol=length(n_i_options))
+#colnames(df_icers) <- n_i_options
+#v_result <- c()
+#
+#
+#for (j in 1:length(n_i_options)){
+#n_i <- n_i_options[j]
+#
+##resample baseline characteristics
+#baseline                        <- as.data.frame(rmvbin(n_i, df_mu, sigma = df_cor))
+#colnames(baseline)              <- colnames(df_cor)
+#baseline$peri_a_Y               <- ifelse(baseline$peri_a_N == 1, 0, 1) # recode no and yes 
+#baseline$smoke_N                <- ifelse(baseline$smoke_N == 1, 0, 1)  # recode no and yes 
+#
+#l_params_all$baseline <- baseline 
+#
+#for (i in 1:iterations){
+#  outcomes_no_trt <- MicroSim(l_params_all, n_i, df_X, TRT1 = "MTX", TRT2 = "IFX5", TRT3 = "UST", TRT4 = "UPA" ,TRT5 = "RIS" , seed = i)
+#  outcomes_trt    <- MicroSim(l_params_all, n_i, df_X, TRT1 = "AZA", TRT2 = "IFX5",  TRT3 = "UST",  TRT4 = "UPA", TRT5 = "RIS", seed = i)
+#  
+#  v_C <-  mean(outcomes_trt$tc_hat-outcomes_no_trt$tc_hat)
+#  v_E <-  mean(outcomes_trt$te_hat-outcomes_no_trt$te_hat) 
+#  v_result[i] <- v_C/v_E
+# }
+# df_icers[,j] <- v_result
+#
+# cat(paste0(round(j / length(n_i_options) * 100), '% completed')) 
+#
+# }
+#
+```
+
+## 9.8 Determine number of patients and simulations in PSA
+
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+pl_var <- var(outcomes_new$tc) # patient-level variance in deterministic run
+PSA_te <- df_e$`AZA-IFX+AZA-UST-RIS`#read.csv(here::here("output", "effectiveness_PSA_5000_5000_PEG_GLA20_CLA3.5_OCR_ALE.csv"))
+PSA_tc <- df_c$`AZA-IFX+AZA-UST-RIS`#read.csv(here::here("output", "cost_PSA_5000_5000_PEG_GLA20_CLA3.5_OCR_ALE.csv"))
+par_var <- var(PSA_tc) # var(l_psa$effectiveness$treatment) 
+
+k <- pl_var/par_var
+c <- .2 # Less than or equal to 0.2 according to O'Hagan et al. (c especially smaller when number of pts larger)
+M <- 8*k/c*2
+
+n_PSA <- 1+k
+N <- M/n_PSA
+
+k
+n_PSA
+N
+
+mean(PSA_te$treatment)
+mean(PSA_te$no_treatment)
+
+mean(PSA_tc$treatment)
+mean(PSA_tc$no_treatment)
+
+```
+
+## 10.0 Optimal price analysis
+```{r}
+knitr::opts_chunk$set(eval = FALSE)
+#Define best NHB from step-up or top down strategy
+reference_NHB <- -8.018389 #check with deterministic results what is best strategy and its NHB 
+wtp <- 20000 #make sure to use the same WTP as used for reference_NHB, now not the case
+
+discount_range <- seq(0, 1, 0.01)
+df_results     <- data.frame(discount_UST = discount_range, NHB = NA)
+
+df_c_trt_pricing <- df_c_trt_pricing_bc <- l_params_all$df_c_trt
+
+# This for loop runs the analysis for every discount, starting with 0% and increasing with x% each time (defined in steps in 'discount_range').
+# This for loop stops when the NHB becomes larger than 'reference_NHB' and saves the current discount which refers to the minimum discount of evobrutinib at which the treatment strategy is cost-effective.
+PSA <- T #faster
+for(j in 1:length(discount_range)){
+
+# Apply the discount on the acquisition costs 
+l_params_all$df_c_trt[l_params_all$df_c_trt$curTrt == "UST", 2:3] <- l_params_all$df_c_trt[l_params_all$df_c_trt$curTrt == "UST", 2:3]*(1-discount_range[j])
+
+# Run the MicroSim but only save NHB using pricing = T
+price_result <- MicroSim(l_params_all, n_i, df_X, TRT1 = "IFX+AZA", TRT2 = "UST", TRT3 = "VED", TRT4 = "RIS", TRT5 = "UPA" , seed = 1)
+NHB <- price_result$te_hat - (price_result$tc_hat/wtp)
+l_params_all$df_c_trt <- df_c_trt_pricing_bc
+
+df_results[j, 2] <- NHB
+
+if(NHB > reference_NHB){
+  break
+}
+print(paste("Discount required ", discount_range[j]*100, "%"))
+}
+
+```
+## Model validation
+```{R}
+knitr::opts_chunk$set(eval = FALSE)
+#Validation 1
+
+#On-treatment time is compared with an analysis of time to discontinuation for anti-TNF from Dutch claims data(10). This study uses data from 22,082 IBD patients in the Netherlands. Infliximab use was second line and in 66% combined with an immunomodulator. The reported proportion of discontinued patients for Crohn’s disease was 62%, 48%, 38%, 32%, 25% at respectively 400, 800, 1200, 1600 and 2000 days after start treatment. Bots SJ, Hoekman DR, Benninga MA, Ponsioen CY, D'Haens GR, Löwenberg M. Patterns of anti-TNF use and associated treatment outcomes in inflammatory bowel disease patients: results from an analysis of Dutch health insurance claims data. The Netherlands journal of medicine. 2017 Dec;75(10):432-42.
+
+df_validation <- data.frame(t_since_start = c(400, 800, 1200, 1600, 2000), p_claims_data = c(62, 48, 38, 32, 25))
+
+#proportion of patients starting a second line (here for seq: AZA-IFX+AZA-VED-UPA-RIS)
+n_second_line <- sum(!is.na(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T)))))
+
+#matching cycle length (cycle length is 12 weeks * 7 = 84 days)
+matching_cycle <- df_validation$t_since_start/84
+
+df_validation$p_model_data_IFX <- round(c(sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >matching_cycle[1], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >matching_cycle[2], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >matching_cycle[3], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >matching_cycle[4], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >matching_cycle[5], 1, NA))) / n_second_line),2)
+df_validation$p_model_data_ADA   <- round(c(sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[210]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[153]]$m_L==2, na.rm = T))) >matching_cycle[1], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[153]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[153]]$m_L==2, na.rm = T))) >matching_cycle[2], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[153]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[153]]$m_L==2, na.rm = T))) >matching_cycle[3], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[153]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[153]]$m_L==2, na.rm = T))) >matching_cycle[4], 1, NA))) / n_second_line,
+                                sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[153]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[153]]$m_L==2, na.rm = T))) >matching_cycle[5], 1, NA))) / n_second_line),2)                             
+df_validation$weighted <- round(df_validation$p_model_data_IFX*0.6 + df_validation$p_model_data_ADA *0.4,2)
+
+
+  #Check proportion in specific line, when line == 2 (here for seq: AZA-IFX+AZA-VED-UPA-RIS)
+sum(!is.na(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))))) #how many people have a line 2
+#9942
+sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >=4, 1, NA))) #how many after 1 year
+#5808
+sum(!is.na(ifelse(as.numeric(ifelse(rowSums(results[[155]]$m_L==2, na.rm = T)==0, NA, rowSums(results[[155]]$m_L==2, na.rm = T))) >= 8, 1, NA))) #how many after 2 year
+#4979
+5808/9942 #year 1
+4979/9942 #year 2
+
+
+#Check proportion in specific line, when line == 2
+sum(ifelse(results[[141]]$m_L[,1] == 1, 1, 0))
+sum(ifelse(results[[141]]$m_L[,2] == 1, 1, 0))
+sum(ifelse(results[[141]]$m_L[,3] == 1, 1, 0))
+sum(ifelse(results[[141]]$m_L[,4] == 1, 1, 0))
+
+#Validation 2
+#The second validation is a short-term outcome comparison with the study by D'Haen et al on step-up vs top down, comparing IFX+AZA vs AZA
+#At week 26, 39 (60·0%) of 65 patients in the combined immunosuppression group were in remission without corticosteroids and without surgical resection, compared with 23 (35·9%) of 64 controls, for an absolute difference of 24·1% (95% CI 7·3–40·8, p=0·0062). 
+#D'Haens G, Baert F, van Assche G, Caenepeel P, Vergauwe P, Tuynman H, De Vos M, van Deventer S, Stitt L, Donner A, Vermeire S. Early combined immunosuppression or conventional management in patients with newly diagnosed Crohn's disease: an open randomised trial. The Lancet. 2008 Feb 23;371(9613):660-7.
+#We look at the 24 week mark and compare it to the 26 mark of D'Haen. D'Haen at week 26.
+
+tic()
+PSA <- F #if TRUE decreases number of stored parameters ± 8 seconds faster.
+outcomes_new <- MicroSim(l_params_all, n_i, df_X, TRT1 = "IFX+AZA", TRT2 = "UST", TRT3 = "UPA", TRT4 = "VED", TRT5 = "RIS" , seed = 1)
+toc()
+
+outcomes_old <- MicroSim(l_params_all, n_i, df_X, TRT1 = "AZA", TRT2 = "IFX5",  TRT3 = "RIS",  TRT4 = "UPA", TRT5 = "VED", seed = 1)
+
+#proportion in remission
+prop_rem_new <- matrix(nrow = n_i,ncol = 6)
+prop_rem_old <- matrix(nrow = n_i,ncol = 6)
+for(i in 2:6){
+prop_rem_new[,i] <- ifelse(outcomes_new$m_M[,i] == "REM", 1, 0)
+prop_rem_old[,i] <- ifelse(outcomes_old$m_M[,i] == "REM", 1, 0)
+}
+colSums(prop_rem_new)
+colSums(prop_rem_old)
+# results % of patients in remission:
+#top down wk 12,24,36,48,60    0 62241 72803 80503 83107
+#step up wk 12,24,36,48,60    0 30447 62343 69497 76945
+
+
+```
