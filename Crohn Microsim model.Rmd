@@ -212,7 +212,7 @@ v_names_lines                   <- c("TRT1", "TRT2", "TRT3", "TRT4", "TRT5", "su
 
 
 # Sample a patient population of n_i from IBD-ZL first line patients using covariance matrix
-load(here::here("input", "FirstLine_simulate_baseline-1.RData"))
+load(here::here("Input", "FirstLine_simulate_baseline-1.RData"))
 baseline                        <- as.data.frame(rmvbin(n_i, df_mu, sigma = df_cor))
 colnames(baseline)              <- colnames(df_cor)
 baseline$peri_a_Y               <- ifelse(baseline$peri_a_N == 1, 0, 1) # recode no and yes 
