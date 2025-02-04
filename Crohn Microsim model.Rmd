@@ -57,7 +57,7 @@ load(here::here("Input", "FirstLine_TTOS.RData"))                       # other 
 s_df_tp_sur_OS <- best_model$Lognormal
 
 # Transition probabilities estimated on survival objects (code in section 5.1)
-load(here::here("input", "df_tp_RWD.RData"))
+load(here::here("Input", "df_tp_RWD.RData"))
 
 df_tp_FL1_AZA    <- df_tp_FL1        #line 1
 df_tp_FL2_IFX    <- df_tp_FL2_nai    #line 2 or 3 if biologic naive 
