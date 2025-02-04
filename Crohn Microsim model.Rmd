@@ -109,7 +109,7 @@ load(here::here("Output", "NMA_PSA_ind_REM_nai.RData"))
 load(here::here("Output", "NMA_PSA_ind_REM_exp.RData"))
 load(here::here("Output", "NMA_PSA_mai_REMRES_nai.RData"))
 load(here::here("Output", "NMA_PSA_mai_REMRES_nai_L2.RData"))
-load(here::here("Output", "NMA_PSA_mai_REMRES_exp.RData"))
+load(here::here("Output", "NMA_PSA_mai_REMRES_exp.Rdata"))
 load(here::here("Output", "NMA_PSA_AE_nai.RData"))
 load(here::here("Output", "NMA_PSA_AE_exp.RData"))
 
