@@ -1007,7 +1007,7 @@ MicroSim <- function(l_params_all, n_i, df_X, TRT1 = TRT1, TRT2 = TRT2, TRT3 = T
   m_S_o[, 1]  <- rep(0,n_i)                   # matrix to capture if an individual had other surgery
   m_D[, 1]    <- df_X$death                   # matrix to capture the moment of death for individual i
   
-  # Costs and QALYs in cycle 1 (to allow comparisons with outcome of DES-type model)
+  # Costs and QALYs in cycle 1 
   m_C[, 1]  <- Costs(l_params_all, m_M[, 1],  df_X)     
   m_E[, 1]  <- Effs (l_params_all, m_M[, 1], df_X)
   
