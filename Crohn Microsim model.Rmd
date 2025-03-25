@@ -41,7 +41,7 @@ source(here::here("Functions", "functions.R"))
 
 # Settings
 include_AE <- "yes"         # Include discontinuation due to adverse events "yes" or "no" (base case = yes)
-prices     <- "discounted"  #"list" for list prices or "discounted" for prices based on Vektis declaration data (including discounts). All 2023 Euros.
+prices     <- "list"  #"list" for list prices or "discounted" for prices based on Vektis declaration data (including discounts) (not publicly available). All 2023 Euros.
 
 
 # Survival objects for time to active disease based on the IBD-ZL or ICC cohort
