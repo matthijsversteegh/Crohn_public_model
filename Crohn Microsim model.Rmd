@@ -1,7 +1,7 @@
 ---
 title: "Microsimulation model Crohn's disease"
 authors: "Dr Matthijs Versteegh & Dr Simone Huygens"
-date: "January 7th 2025"
+date: "First draft: January 7th 2025. Post TECH-VER checklist update: April 15th 2025"
 output: word_document
 model type: Microsimulations (expanded from DARTH modeling framework to incorporate survival)
 Further readings:
@@ -57,7 +57,8 @@ load(here::here("Input", "FirstLine_TTOS.RData"))                       # other 
 s_df_tp_sur_OS <- best_model$Lognormal
 
 # Transition probabilities estimated on survival objects (code in section 5.1)
-load(here::here("Input", "df_tp_RWD.RData"))
+#load(here::here("Input", "df_tp_RWD.RData")) #deprecated after TECH-VER checklist
+load(here::here("Input", "df_tp_RWD_update20250414.RData"))
 
 df_tp_FL1_AZA    <- df_tp_FL1        #line 1
 df_tp_FL2_IFX    <- df_tp_FL2_nai    #line 2 or 3 if biologic naive 
@@ -192,10 +193,10 @@ sd_age                          <- 16.1                                   # SD a
 max_age                         <- 108                                    # max age based on max in Human Mortality Database
 prop_female                     <- 1-0.3025                               # proportion females: baseline data IBD-ZL
 cl_wk                           <- 12                                     # cycle length in weeks
-n_t                             <- (max_age-age)*(52/cl_wk)               # time horizon in cl_wk week-cycles
+n_t                             <- as.integer((max_age-18)*(52/cl_wk))    # time horizon in cl_wk week-cycles
 n_cycles                        <- n_t                                    # number of cycles
-n_i                             <- 30000                                  # number of simulated individuals # >=10.000 recommended for base case
-v_n                             <- c("ACT", "REM", "REM_ps", "D")  # the model states names
+n_i                             <- 30000                                  # number of simulated individuals # > 10.000 recommended for base case
+v_n                             <- c("ACT", "REM", "REM_ps", "D")         # the model health states names (active disease, remission, remission post surgery, death)
 v_names_states                  <- v_n                                    # variable needed for plot_trace_microsim
 n_states                        <- length(v_n)                            # the number of health states
 d_rc                            <- 0.030                                  # discount rate costs
@@ -251,6 +252,7 @@ df_mort                         <- read.csv(here::here("Input", "sterfte_NL_2019
 df_mort$r_mort                  <- prop_female*df_mort$Female*HR_EM_CD_F + (1-prop_female)*df_mort$Male*HR_EM_CD_M
 df_mort$r_mort_cl               <- df_mort$r_mort*(1/(52/cl_wk)) # convert annual mortality rate to x-weekly mortality rate
 df_mort$p_mort                  <- 1-exp(-df_mort$r_mort_cl)     # convert rate to probability
+df_mort$p_mort[109]             <- 1 #close the life table, no survival beyond this age
 
 ###########           COSTS            #################################################################
 
@@ -1062,13 +1064,14 @@ MicroSim <- function(l_params_all, n_i, df_X, TRT1 = TRT1, TRT2 = TRT2, TRT3 = T
     # If a patient is dead, the value of treatment line becomes 999
     # If a patient discontinues treatment due to all cause discontinuation rates, then switch to next line
       
-    df_X$Line <- ifelse(m_M[, t + 1] =="D", 999,
+   df_X$Line <- ifelse(m_M[, t + 1] =="D", 999,
                  ifelse(m_M[, t + 1] == "REM_ps", df_X$Line,                              # post surgery is not a treatment line
                  ifelse(m_M[, t + 1] == "ACT" & m_M[, t] != "D" & df_X$Line == 5, 555,    #  switch to no treatment if all lines exhausted
                  ifelse(m_M[, t + 1] == "ACT" & df_X$ind >= df_X$t_ind & df_X$Line < 5, df_X$Line + 1,    #switch due to induction not working
                  ifelse(m_M[, t + 1] == "ACT" & m_M[ , t] == "REM" & df_X$Line < 5, df_X$Line + 1,        #switch due to losing effectiveness
                  ifelse(m_M[, t + 1] == "ACT" & m_M[ , t] == "REM_ps" & df_X$Line < 5, df_X$Line + 1, 
-                 ifelse(m_M[, t + 1] == "REM" & df_X$disc == 1 & df_X$Line < 5, df_X$Line + 1,  df_X$Line))))))) #discontinuation switch
+                 ifelse(m_M[, t + 1] == "REM" & df_X$disc == 1 & df_X$Line < 5, df_X$Line + 1,  
+                 ifelse(m_M[, t + 1] == "REM" & df_X$disc == 1 & df_X$Line == 5, 555, df_X$Line)))))))) #discontinuation switch
 
     # Update matrix with current line number
     m_L[ , t + 1] <- df_X$Line
