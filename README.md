@@ -5,10 +5,12 @@ In collaboration with 4 gastroenterologists assigned by NVMDL.
 
 Please read the original manuscripts to understand model structure (CE-model manuscript) and input data (NMA manuscript).
 
-A model update manual is provided in thie repository.
+A model update manual is provided in the repository.
 
 NMA manuscript
+
 Versteegh M, Idema DL, Huygens S, Jenniskens K, Pierik M, Römkens T, van Schaik F, Wahab P, Huis LF, Kusters M, van der Braak K. Comparative efficacy of all available pharmaceutical therapies for moderate to severe Crohn’s disease: a systematic review and network meta-analysis. Gastro Hep Advances. 2025 Aug 12:100764.
 
 Cost-effectiveness model manuscript
+
 Versteegh MM, Huygens SA, Bermejo I, Grimm S, Pierik M, Römkens T, van Schaik F, Wahab P. Cost–Utility Analysis of Treatment Sequences for Moderate-to-Severe Crohn’s Disease. PharmacoEconomics. 2025 Aug 23:1-3.
